@@ -5,13 +5,13 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Kanban</title>
     <meta name="color-scheme" content="light dark" />
-    <link rel="stylesheet" href="style.css?v=2026-01-09-2" />
+    <link rel="stylesheet" href="style.css?v=2026-01-09-5" />
   </head>
   <body>
     <header class="app-header">
       <div class="brand">
         <div class="brand-title">Kanban</div>
-        <div class="brand-subtitle">Offline • IndexedDB • Multi-board</div>
+        <div class="brand-subtitle">Offline - IndexedDB - Multi-board</div>
       </div>
 
       <div class="toolbar" role="toolbar" aria-label="Kanban controls">
@@ -37,14 +37,14 @@
         <label class="field">
           <span class="field-label">Quick add (To Do)</span>
           <div class="inline">
-            <input id="quickAddTitle" class="input" type="text" placeholder="Task title…" maxlength="120" />
+            <input id="quickAddTitle" class="input" type="text" placeholder="Task title..." maxlength="120" />
             <button id="quickAddBtn" class="btn btn-primary" type="button">Add</button>
           </div>
         </label>
 
         <label class="field">
           <span class="field-label">Search</span>
-          <input id="searchInput" class="input" type="search" placeholder="Title, tags, assignee…" />
+          <input id="searchInput" class="input" type="search" placeholder="Title, tags, assignee..." />
         </label>
 
         <label class="field">
@@ -78,7 +78,7 @@
         </div>
 
         <button id="themeToggle" class="btn btn-icon" type="button" aria-label="Toggle theme">
-          <span class="icon" aria-hidden="true">◐</span>
+          <span class="icon" aria-hidden="true">T</span>
         </button>
       </div>
     </header>
@@ -89,7 +89,44 @@
         <button id="refreshBtn" class="btn btn-primary" type="button">Refresh</button>
       </div>
 
-      <div id="columns" class="columns" aria-label="Board"></div>
+      <div id="scrumView" hidden>
+        <section class="scrum-section">
+          <div class="scrum-bar">
+            <div>
+              <div class="scrum-title">Sprint</div>
+              <div id="activeSprintMeta" class="muted" style="font-size: 12px"></div>
+            </div>
+            <div class="scrum-controls">
+              <select id="activeSprintSelect" class="select" aria-label="Select sprint"></select>
+              <button id="newSprintBtn" class="btn" type="button">New sprint</button>
+              <button id="startSprintBtn" class="btn btn-primary" type="button">Start</button>
+              <button id="completeSprintBtn" class="btn btn-danger" type="button">Complete</button>
+              <button id="sprintReportBtn" class="btn" type="button">Report</button>
+            </div>
+          </div>
+          <div id="sprintColumns" class="columns" aria-label="Sprint board"></div>
+        </section>
+
+        <section class="scrum-section">
+          <div class="scrum-bar">
+            <div>
+              <div class="scrum-title">Backlog</div>
+              <div class="muted" style="font-size: 12px">
+                Plan by adding issues into a sprint, then start the sprint.
+              </div>
+            </div>
+            <div class="scrum-controls">
+              <button id="newBacklogIssueBtn" class="btn btn-primary" type="button">New issue</button>
+            </div>
+          </div>
+          <div id="plannedSprints" class="planned"></div>
+          <div id="backlogList" class="backlog-list" aria-label="Backlog list"></div>
+        </section>
+      </div>
+
+      <div id="kanbanView">
+        <div id="columns" class="columns" aria-label="Kanban board"></div>
+      </div>
     </main>
 
     <div id="bulkBar" class="bulk-bar" hidden role="region" aria-label="Bulk actions">
@@ -99,7 +136,13 @@
       <div class="bulk-right">
         <label class="field compact">
           <span class="field-label">Move to</span>
-          <select id="bulkMoveStatus" class="select" aria-label="Move selected to status"></select>
+          <select id="bulkMoveStatus" class="select" aria-label="Move selected to status">
+            <option value="todo">To Do</option>
+            <option value="inprogress">In Progress</option>
+            <option value="review">Review</option>
+            <option value="test">Test</option>
+            <option value="done">Done</option>
+          </select>
         </label>
         <button id="bulkMoveBtn" class="btn" type="button">Move</button>
         <button id="bulkDeleteBtn" class="btn btn-danger" type="button">Delete</button>
@@ -108,18 +151,11 @@
     </div>
 
     <input id="importFileInput" type="file" accept="application/json,.json" hidden />
-
     <div id="toastRoot" class="toast-root" aria-live="polite" aria-atomic="true"></div>
 
     <div id="modalBackdrop" class="modal-backdrop" hidden></div>
-    <div
-      id="taskModal"
-      class="modal"
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="taskModalTitle"
-      hidden
-    >
+
+    <div id="taskModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="taskModalTitle" hidden>
       <form id="taskForm" class="modal-card">
         <div class="modal-header">
           <div>
@@ -129,7 +165,7 @@
             </div>
           </div>
           <button id="closeModalBtn" class="btn btn-icon" type="button" aria-label="Close">
-            <span aria-hidden="true">✕</span>
+            <span aria-hidden="true">x</span>
           </button>
         </div>
 
@@ -145,7 +181,7 @@
           <textarea id="taskDescription" class="textarea" rows="5"></textarea>
           <div class="inline">
             <button id="togglePreviewBtn" class="btn" type="button">Preview</button>
-            <span class="muted" style="font-size:12px;">Markdown supported</span>
+            <span class="muted" style="font-size: 12px">Markdown supported</span>
           </div>
           <div id="mdPreview" class="md-preview" hidden></div>
         </label>
@@ -153,7 +189,13 @@
         <div class="grid-2">
           <label class="field">
             <span class="field-label">Status</span>
-            <select id="taskStatus" class="select"></select>
+            <select id="taskStatus" class="select">
+              <option value="todo">To Do</option>
+              <option value="inprogress">In Progress</option>
+              <option value="review">Review</option>
+              <option value="test">Test</option>
+              <option value="done">Done</option>
+            </select>
           </label>
 
           <label class="field">
@@ -170,7 +212,7 @@
         <div class="grid-2">
           <label class="field">
             <span class="field-label">Assigned to</span>
-            <input id="taskAssignee" class="input" type="text" placeholder="Name…" maxlength="80" />
+            <input id="taskAssignee" class="input" type="text" placeholder="Name..." maxlength="80" />
           </label>
           <label class="field">
             <span class="field-label">Due date</span>
@@ -193,32 +235,35 @@
         </div>
 
         <div class="grid-2">
-          <label class="field checkbox-field">
+          <label class="field">
             <span class="field-label">Sprint</span>
-            <div class="inline">
-              <input id="taskInSprint" type="checkbox" />
-              <span class="muted" style="font-size:12px;">Include in sprint (Scrum view)</span>
-            </div>
+            <select id="taskSprint" class="select" aria-label="Select sprint"></select>
           </label>
           <label class="field checkbox-field">
             <span class="field-label">Blocked</span>
             <div class="inline">
               <input id="taskBlocked" type="checkbox" />
-              <span class="muted" style="font-size:12px;">Show as blocked</span>
+              <span class="muted" style="font-size: 12px">Show as blocked</span>
             </div>
           </label>
         </div>
 
         <label class="field">
           <span class="field-label">Color (optional)</span>
-          <input id="taskColor" class="input" type="color" value="#4f46e5" />
+          <input id="taskColor" class="input" type="color" value="#0052cc" />
         </label>
 
         <div class="section">
           <div class="section-title">Checklist</div>
           <div id="checklistList" class="list"></div>
           <div class="inline">
-            <input id="checklistNew" class="input" type="text" placeholder="New checklist item…" maxlength="140" />
+            <input
+              id="checklistNew"
+              class="input"
+              type="text"
+              placeholder="New checklist item..."
+              maxlength="140"
+            />
             <button id="checklistAddBtn" class="btn" type="button">Add</button>
           </div>
         </div>
@@ -227,7 +272,7 @@
           <div class="section-title">Attachments</div>
           <div id="attachmentsList" class="list"></div>
           <div class="inline">
-            <input id="attachmentNew" class="input" type="url" placeholder="https://…" />
+            <input id="attachmentNew" class="input" type="url" placeholder="https://..." />
             <button id="attachmentAddBtn" class="btn" type="button">Add</button>
           </div>
         </div>
@@ -251,7 +296,7 @@
             <div class="modal-meta"><span class="muted">WIP limits, policies, grouping</span></div>
           </div>
           <button id="closeSettingsBtn" class="btn btn-icon" type="button" aria-label="Close settings">
-            <span aria-hidden="true">✕</span>
+            <span aria-hidden="true">x</span>
           </button>
         </div>
 
@@ -265,7 +310,6 @@
         </label>
 
         <div id="wipGrid" class="wip-grid"></div>
-
         <div id="policyGrid" class="policy-grid"></div>
 
         <div class="modal-actions">
@@ -283,7 +327,7 @@
             <div class="modal-meta"><span class="muted">Analytics + activity log</span></div>
           </div>
           <button id="closeInsightsBtn" class="btn btn-icon" type="button" aria-label="Close insights">
-            <span aria-hidden="true">✕</span>
+            <span aria-hidden="true">x</span>
           </button>
         </div>
 
@@ -303,12 +347,12 @@
             <div class="modal-meta"><span class="muted">Create and manage epics for this board</span></div>
           </div>
           <button id="closeEpicsBtn" class="btn btn-icon" type="button" aria-label="Close epics">
-            <span aria-hidden="true">✕</span>
+            <span aria-hidden="true">x</span>
           </button>
         </div>
 
         <div class="inline">
-          <input id="epicNewName" class="input" type="text" placeholder="New epic name…" maxlength="80" />
+          <input id="epicNewName" class="input" type="text" placeholder="New epic name..." maxlength="80" />
           <button id="epicCreateBtn" class="btn btn-primary" type="button">Create</button>
         </div>
 
@@ -316,10 +360,73 @@
       </div>
     </div>
 
+    <div id="sprintModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="sprintModalTitle" hidden>
+      <form id="sprintForm" class="modal-card">
+        <div class="modal-header">
+          <div>
+            <div id="sprintModalTitle" class="modal-title">New sprint</div>
+            <div class="modal-meta"><span class="muted">Create a sprint (planned)</span></div>
+          </div>
+          <button id="closeSprintBtn" class="btn btn-icon" type="button" aria-label="Close sprint modal">
+            <span aria-hidden="true">x</span>
+          </button>
+        </div>
+
+        <label class="field">
+          <span class="field-label">Name</span>
+          <input id="sprintName" class="input" type="text" maxlength="80" required />
+        </label>
+
+        <div class="grid-2">
+          <label class="field">
+            <span class="field-label">Start date</span>
+            <input id="sprintStartDate" class="input" type="date" />
+          </label>
+          <label class="field">
+            <span class="field-label">End date</span>
+            <input id="sprintEndDate" class="input" type="date" />
+          </label>
+        </div>
+
+        <div class="modal-actions">
+          <div class="spacer"></div>
+          <button id="createSprintBtn" class="btn btn-primary" type="submit">Create sprint</button>
+        </div>
+      </form>
+    </div>
+
+    <div
+      id="sprintReportModal"
+      class="modal"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="sprintReportModalTitle"
+      hidden
+    >
+      <div class="modal-card">
+        <div class="modal-header">
+          <div>
+            <div id="sprintReportModalTitle" class="modal-title">Sprint report</div>
+            <div class="modal-meta"><span class="muted">Committed vs completed + burndown</span></div>
+          </div>
+          <button id="closeSprintReportBtn" class="btn btn-icon" type="button" aria-label="Close sprint report">
+            <span aria-hidden="true">x</span>
+          </button>
+        </div>
+
+        <label class="field">
+          <span class="field-label">Sprint</span>
+          <select id="reportSprintSelect" class="select"></select>
+        </label>
+
+        <div id="sprintReportBody" class="insights"></div>
+      </div>
+    </div>
+
     <noscript>
       <div class="noscript">This app requires JavaScript.</div>
     </noscript>
 
-    <script type="module" src="script.js?v=2026-01-09-2"></script>
+    <script type="module" src="script.js?v=2026-01-09-5"></script>
   </body>
 </html>

@@ -5,14 +5,19 @@ import {
   getBoards,
   getEpics,
   getEvents,
+  getSprints,
+  getSprintSnapshots,
   getTasks,
   initDB,
   makeId,
   saveEpic,
+  saveSprint,
   saveTask,
   saveTasks,
   deleteEpic,
-} from "./db.js?v=2026-01-09-2";
+  deleteSprint,
+  upsertSprintSnapshot,
+} from "./db.js?v=2026-01-09-5";
 import {
   COLUMN_IDS,
   COLUMN_LABELS,
@@ -23,8 +28,8 @@ import {
   renameBoard,
   setActiveBoardId,
   updateBoardSettings,
-} from "./boards.js?v=2026-01-09-2";
-import { initTheme, toggleTheme } from "./theme.js?v=2026-01-09-2";
+} from "./boards.js?v=2026-01-09-5";
+import { initTheme, toggleTheme } from "./theme.js?v=2026-01-09-5";
 
 const state = {
   boards: [],
@@ -35,6 +40,9 @@ const state = {
   tasksById: new Map(),
   epics: [],
   epicsById: new Map(),
+  sprints: [],
+  sprintsById: new Map(),
+  activeSprintId: null,
   draggingEl: null,
   filter: { search: "", priority: "", groupBy: "none" },
   bulk: { enabled: false, selected: new Set() },
@@ -48,7 +56,7 @@ function nowISO() {
   return new Date().toISOString();
 }
 
-const APP_VERSION = "2026-01-09-2";
+const APP_VERSION = "2026-01-09-5";
 
 function parseLabels(input) {
   if (!input) return [];
@@ -70,6 +78,7 @@ function ensureBoardDefaults(board) {
   }
   b.groupBy = b.groupBy || "none";
   b.viewMode = b.viewMode === "scrum" ? "scrum" : "kanban";
+  b.activeSprintId = b.activeSprintId || null;
   return b;
 }
 
@@ -86,7 +95,10 @@ function canPlaceInStatus(status, { excludingTaskId = null } = {}) {
   const count = state.tasks.filter((t) => {
     if (t.status !== status) return false;
     if (t.id === excludingTaskId) return false;
-    if (state.viewMode === "scrum" && !t.inSprint) return false;
+    if (state.viewMode === "scrum") {
+      if (!state.activeSprintId) return false;
+      if (t.sprintId !== state.activeSprintId) return false;
+    }
     return true;
   }).length;
   return count < limit;
@@ -261,9 +273,7 @@ function normalizeTask(task) {
   normalized.color = normalized.color || "#4f46e5";
   normalized.assignee = normalized.assignee || "";
   normalized.epicId = normalized.epicId || "";
-  normalized.inSprint = Object.prototype.hasOwnProperty.call(normalized, "inSprint")
-    ? Boolean(normalized.inSprint)
-    : true;
+  normalized.sprintId = normalized.sprintId || "";
   normalized.dueDate = normalized.dueDate || "";
   normalized.labels = Array.isArray(normalized.labels) ? normalized.labels : parseLabels(normalized.labels);
   normalized.blocked = Boolean(normalized.blocked);
@@ -281,10 +291,37 @@ async function loadBoardsAndActive() {
   state.activeBoard = state.boards.find((b) => b.id === state.activeBoardId) || null;
   if (state.activeBoard) state.filter.groupBy = state.activeBoard.groupBy || "none";
   state.viewMode = state.activeBoard?.viewMode || "kanban";
+  state.activeSprintId = state.activeBoard?.activeSprintId || null;
 }
 
 async function loadTasks() {
-  state.tasks = (await getTasks(state.activeBoardId)).map(normalizeTask).sort(byOrderThenDate);
+  const loaded = (await getTasks(state.activeBoardId)).map(normalizeTask);
+
+  const migrated = [];
+  for (const t of loaded) {
+    if (!t.sprintId && typeof t.inSprint === "boolean" && state.activeSprintId) {
+      const copy = { ...t, sprintId: t.inSprint ? state.activeSprintId : "" };
+      delete copy.inSprint;
+      migrated.push(copy);
+    } else if (typeof t.inSprint === "boolean") {
+      const copy = { ...t };
+      delete copy.inSprint;
+      migrated.push(copy);
+    }
+  }
+  if (migrated.length) {
+    try {
+      await saveTasks(migrated);
+      for (const t of migrated) {
+        const idx = loaded.findIndex((x) => x.id === t.id);
+        if (idx >= 0) loaded[idx] = normalizeTask(t);
+      }
+    } catch {
+      // ignore migration errors
+    }
+  }
+
+  state.tasks = loaded.sort(byOrderThenDate);
   state.tasksById = new Map(state.tasks.map((t) => [t.id, t]));
 }
 
@@ -293,6 +330,19 @@ async function loadEpics() {
     String(a.name || "").localeCompare(String(b.name || "")),
   );
   state.epicsById = new Map(state.epics.map((e) => [e.id, e]));
+}
+
+async function loadSprints() {
+  const sprints = await getSprints(state.activeBoardId);
+  sprints.sort((a, b) => {
+    const order = { active: 0, planned: 1, completed: 2 };
+    const ao = order[a.status] ?? 9;
+    const bo = order[b.status] ?? 9;
+    if (ao !== bo) return ao - bo;
+    return String(a.endDate || a.startDate || "").localeCompare(String(b.endDate || b.startDate || ""));
+  });
+  state.sprints = sprints;
+  state.sprintsById = new Map(state.sprints.map((s) => [s.id, s]));
 }
 
 function renderBoardSelect() {
@@ -308,40 +358,28 @@ function renderBoardSelect() {
 }
 
 function renderColumns() {
+  const scrumView = document.getElementById("scrumView");
+  const kanbanView = document.getElementById("kanbanView");
+  if (state.viewMode === "scrum") {
+    if (scrumView) scrumView.hidden = false;
+    if (kanbanView) kanbanView.hidden = true;
+    renderScrum();
+    return;
+  }
+  if (scrumView) scrumView.hidden = true;
+  if (kanbanView) kanbanView.hidden = false;
+
   const columnsRoot = el("columns");
   const tasks = filteredTasks();
-  const isScrum = state.viewMode === "scrum";
-  columnsRoot.classList.toggle("is-scrum", isScrum);
-  const sprintTasks = isScrum ? tasks.filter((t) => t.inSprint) : tasks;
-  const backlogTasks = isScrum ? tasks.filter((t) => !t.inSprint) : [];
-  const counts = taskCounts(sprintTasks);
+  const counts = taskCounts(tasks);
 
-  const backlogColumn = isScrum
-    ? `
-      <section class="column" data-status="backlog" aria-label="Backlog column">
-        <div class="column-header">
-          <div style="display:flex; gap:10px; align-items:center; min-width:0;">
-            <div class="column-title">Backlog</div>
-            <div class="count-pill" aria-label="Task count">${backlogTasks.length}</div>
-          </div>
-          <div style="display:flex; gap:8px; align-items:center;">
-            <button class="btn btn-icon add-task-btn" type="button" data-status="todo" data-sprint="0" aria-label="Add backlog task">
-              <span aria-hidden="true">+</span>
-            </button>
-          </div>
-        </div>
-        <div class="task-list" role="list" data-status="backlog"></div>
-      </section>
-    `
-    : "";
-
-  const sprintColumns = COLUMN_IDS.map((status) => {
+  const columnsHtml = COLUMN_IDS.map((status) => {
     const label = COLUMN_LABELS[status] || status;
     const limit = wipLimitFor(status);
     const limitLabel = limit ? ` / ${limit}` : "";
     const policy = (state.activeBoard?.columnPolicies?.[status] || "").trim();
     const addButton =
-      !isScrum && status === "todo"
+      status === "todo"
         ? `
           <button class="btn btn-icon add-task-btn" type="button" data-status="${escapeText(
             status,
@@ -369,12 +407,12 @@ function renderColumns() {
             ${addButton}
           </div>
         </div>
-        <div class="task-list" role="list" data-status="${escapeText(status)}"></div>
+        <div class="task-list" role="list" data-root="columns" data-status="${escapeText(status)}"></div>
       </section>
     `;
   }).join("");
 
-  columnsRoot.innerHTML = `${backlogColumn}${sprintColumns}`;
+  columnsRoot.innerHTML = columnsHtml;
 
   for (const status of COLUMN_IDS) {
     const list = columnsRoot.querySelector(`.task-list[data-status="${CSS.escape(status)}"]`);
@@ -382,8 +420,7 @@ function renderColumns() {
     list.addEventListener("dragover", onDragOver);
     list.addEventListener("drop", onDrop);
     list.addEventListener("dragenter", (e) => {
-      if (state.viewMode !== "kanban") return;
-      if (state.filter.groupBy !== "none") return;
+      if (state.filter.groupBy !== "none" || state.bulk.enabled) return;
       e.preventDefault();
       list.style.outline = `2px dashed color-mix(in srgb, var(--accent) 55%, transparent)`;
       list.style.outlineOffset = "4px";
@@ -405,22 +442,311 @@ function renderColumns() {
   renderTasks();
 }
 
-function renderTasks() {
-  const root = el("columns");
-  const isScrum = state.viewMode === "scrum";
-  const tasks = filteredTasks();
-  const sprintTasks = isScrum ? tasks.filter((t) => t.inSprint) : tasks;
-  const backlogTasks = isScrum ? tasks.filter((t) => !t.inSprint) : [];
-  const groupBy = isScrum ? "none" : state.filter.groupBy;
+function render() {
+  renderColumns();
+}
 
-  if (isScrum) {
-    const backlogList = root.querySelector(`.task-list[data-status="backlog"]`);
-    if (backlogList) backlogList.innerHTML = backlogTasks.sort(byOrderThenDate).map(renderTaskCard).join("");
+function formatSprintRange(sprint) {
+  const sd = sprint?.startDate ? String(sprint.startDate) : "";
+  const ed = sprint?.endDate ? String(sprint.endDate) : "";
+  if (sd && ed) return `${sd} to ${ed}`;
+  if (sd) return `Starts ${sd}`;
+  if (ed) return `Ends ${ed}`;
+  return "";
+}
+
+function getActiveSprint() {
+  if (!state.activeSprintId) return null;
+  return state.sprintsById.get(state.activeSprintId) || null;
+}
+
+function renderSprintSelectOptions(selectEl, selectedId) {
+  if (!selectEl) return;
+  const opts = [`<option value="">(none)</option>`].concat(
+    state.sprints.map((s) => {
+      const tag = s.status === "active" ? " [active]" : s.status === "completed" ? " [done]" : "";
+      return `<option value="${escapeText(s.id)}">${escapeText(s.name || "Sprint")}${escapeText(tag)}</option>`;
+    }),
+  );
+  selectEl.innerHTML = opts.join("");
+  if (selectedId) selectEl.value = selectedId;
+}
+
+function renderScrumControls() {
+  const select = document.getElementById("activeSprintSelect");
+  const active = getActiveSprint();
+  const selected = select?.value || active?.id || (state.sprints.find((s) => s.status === "planned")?.id || "");
+  renderSprintSelectOptions(select, selected);
+
+  const meta = document.getElementById("activeSprintMeta");
+  if (meta) meta.textContent = active ? `${active.name} - ${formatSprintRange(active)}` : "No active sprint";
+
+  const startBtn = document.getElementById("startSprintBtn");
+  const completeBtn = document.getElementById("completeSprintBtn");
+  const reportBtn = document.getElementById("sprintReportBtn");
+
+  const selectedSprint = state.sprintsById.get(select?.value || "") || null;
+  if (startBtn) startBtn.disabled = Boolean(active) || !selectedSprint || selectedSprint.status !== "planned";
+  if (completeBtn) completeBtn.disabled = !active;
+  if (reportBtn) reportBtn.disabled = !selectedSprint;
+}
+
+function renderTaskRow(task, { actionLabel = null, action = null, actionSprintId = "" } = {}) {
+  const color = task.color || "#0052cc";
+  const badges = [];
+  if (task.assignee) badges.push(`<span class="badge">Assigned: ${escapeText(task.assignee)}</span>`);
+  if (task.epicId && state.epicsById.has(task.epicId)) {
+    badges.push(`<span class="badge">Epic: ${escapeText(state.epicsById.get(task.epicId).name || "Epic")}</span>`);
   }
+  if (task.priority) badges.push(`<span class="badge ${escapeText(task.priority)}">${escapeText(task.priority)}</span>`);
+  if (task.blocked) badges.push(`<span class="badge high">blocked</span>`);
+
+  const actionBtn =
+    action && actionLabel
+      ? `<button class="mini-btn" type="button" data-action="${escapeText(action)}" data-task-id="${escapeText(
+          task.id,
+        )}" data-sprint-id="${escapeText(actionSprintId)}">${escapeText(actionLabel)}</button>`
+      : "";
+
+  return `
+    <article class="task-card backlog" role="listitem" tabindex="0" draggable="true" data-task-id="${escapeText(
+      task.id,
+    )}">
+      <div class="task-actions">${actionBtn}</div>
+      <div class="task-title">
+        <span class="task-color" style="background:${escapeText(color)}" aria-hidden="true"></span>
+        <span>${escapeText(task.title || "Untitled task")}</span>
+      </div>
+      <div class="task-meta">
+        ${badges.join("")}
+        <span class="badge">${escapeText(COLUMN_LABELS[task.status] || task.status)}</span>
+        <span class="badge">Updated: ${escapeText(shortDate(task.updatedAt))}</span>
+      </div>
+    </article>
+  `;
+}
+
+function renderScrum() {
+  renderScrumControls();
+  renderScrumSprintBoard();
+  renderScrumBacklog();
+}
+
+function renderScrumSprintBoard() {
+  const root = document.getElementById("sprintColumns");
+  if (!root) return;
+  const active = getActiveSprint();
+
+  const all = filteredTasks();
+  const sprintTasks = active ? all.filter((t) => t.sprintId === active.id) : [];
+  const counts = taskCounts(sprintTasks);
+
+  root.innerHTML = COLUMN_IDS.map((status) => {
+    const label = COLUMN_LABELS[status] || status;
+    const limit = wipLimitFor(status);
+    const limitLabel = limit ? ` / ${limit}` : "";
+    const addButton =
+      status === "todo" && active
+        ? `
+          <button class="btn btn-icon add-task-btn" type="button" data-status="todo" data-sprint-id="${escapeText(
+            active.id,
+          )}" aria-label="Add issue to sprint">
+            <span aria-hidden="true">+</span>
+          </button>
+        `
+        : "";
+    return `
+      <section class="column" data-status="${escapeText(status)}" aria-label="${escapeText(label)} column">
+        <div class="column-header">
+          <div style="display:flex; gap:10px; align-items:center; min-width:0;">
+            <div class="column-title">${escapeText(label)}</div>
+            <div class="count-pill" aria-label="Task count">${counts[status] || 0}${escapeText(limitLabel)}</div>
+          </div>
+          ${addButton}
+        </div>
+        <div class="task-list" role="list" data-root="sprintColumns" data-status="${escapeText(status)}"></div>
+      </section>
+    `;
+  }).join("");
+
   for (const status of COLUMN_IDS) {
     const list = root.querySelector(`.task-list[data-status="${CSS.escape(status)}"]`);
     if (!list) continue;
-    const columnTasks = sprintTasks.filter((t) => t.status === status).sort(byOrderThenDate);
+    list.addEventListener("dragover", onDragOver);
+    list.addEventListener("drop", onDrop);
+    list.addEventListener("dragenter", (e) => {
+      if (state.filter.groupBy !== "none" || state.bulk.enabled) return;
+      e.preventDefault();
+      list.style.outline = `2px dashed color-mix(in srgb, var(--accent) 55%, transparent)`;
+      list.style.outlineOffset = "4px";
+    });
+    list.addEventListener("dragleave", () => {
+      list.style.outline = "";
+      list.style.outlineOffset = "";
+    });
+  }
+
+  for (const status of COLUMN_IDS) {
+    const list = root.querySelector(`.task-list[data-status="${CSS.escape(status)}"]`);
+    if (!list) continue;
+    list.innerHTML = sprintTasks.filter((t) => t.status === status).sort(byOrderThenDate).map(renderTaskCard).join("");
+  }
+
+  root.querySelectorAll(".task-card").forEach((card) => {
+    card.addEventListener("click", () => {
+      const id = card.dataset.taskId;
+      const task = state.tasksById.get(id);
+      if (!task) return;
+      openTaskModal({ mode: "edit", task });
+    });
+    card.addEventListener("keydown", (e) => onCardKeyDown(e, card));
+    card.addEventListener("dragstart", onDragStart);
+    card.addEventListener("dragend", onDragEnd);
+    card.querySelectorAll(".mini-btn").forEach((btn) => {
+      btn.addEventListener("click", async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const id = card.dataset.taskId;
+        const task = state.tasksById.get(id);
+        if (!task) return;
+        const dir = btn.dataset.dir;
+        const target = dir === "left" ? prevStatus(task.status) : nextStatus(task.status);
+        await moveTask(id, target, { source: "quick" });
+      });
+    });
+  });
+}
+
+function renderScrumBacklog() {
+  const plannedRoot = document.getElementById("plannedSprints");
+  const backlogRoot = document.getElementById("backlogList");
+  if (!plannedRoot || !backlogRoot) return;
+
+  const active = getActiveSprint();
+  const all = filteredTasks();
+  const backlog = all.filter((t) => !t.sprintId).sort(byOrderThenDate);
+  const planned = state.sprints.filter((s) => s.status === "planned");
+
+  plannedRoot.innerHTML = planned
+    .map((s) => {
+      const tasks = all.filter((t) => t.sprintId === s.id).sort(byOrderThenDate);
+      const count = tasks.length;
+      const startDisabled = Boolean(active);
+      const actions = `
+        <div class="inline">
+          <button class="btn btn-primary" type="button" data-action="start-sprint" data-sprint-id="${escapeText(
+            s.id,
+          )}" ${startDisabled ? "disabled" : ""}>Start</button>
+          <button class="btn btn-danger" type="button" data-action="delete-sprint" data-sprint-id="${escapeText(
+            s.id,
+          )}">Delete</button>
+        </div>
+      `;
+      return `
+        <div class="planned-sprint" data-sprint-id="${escapeText(s.id)}">
+          <div class="planned-header">
+            <div style="display:flex; gap:10px; align-items:baseline; flex-wrap:wrap;">
+              <div class="planned-name">${escapeText(s.name || "Sprint")}</div>
+              <div class="muted" style="font-size:12px;">${escapeText(formatSprintRange(s))}</div>
+              <span class="badge">${count} issues</span>
+            </div>
+            ${actions}
+          </div>
+          <div class="planned-body" role="list">
+            ${tasks
+              .map((t) => renderTaskRow(t, { action: "remove-from-sprint", actionLabel: "Remove", actionSprintId: s.id }))
+              .join("") || `<div class="muted" style="font-size:13px;">No issues in this sprint yet.</div>`}
+          </div>
+        </div>
+      `;
+    })
+    .join("");
+
+  backlogRoot.innerHTML = backlog
+    .map((t) =>
+      renderTaskRow(t, {
+        action: "add-to-sprint",
+        actionLabel: "Add",
+        actionSprintId: "",
+      }),
+    )
+    .join("");
+
+  // Delegated actions for backlog/planned sprints
+  const onClick = async (e) => {
+    const btn = e.target.closest("[data-action]");
+    if (!btn) return;
+    const action = btn.dataset.action;
+    const sprintId = btn.dataset.sprintId || "";
+    const taskId = btn.dataset.taskId || "";
+
+    if (action === "add-to-sprint") {
+      const targetSprintId = sprintId || document.getElementById("activeSprintSelect")?.value || "";
+      await addTaskToSprint(taskId, targetSprintId);
+    } else if (action === "remove-from-sprint") {
+      await removeTaskFromSprint(taskId);
+    } else if (action === "start-sprint") {
+      await startSprint(sprintId);
+    } else if (action === "delete-sprint") {
+      await deletePlannedSprint(sprintId);
+    }
+  };
+
+  plannedRoot.onclick = onClick;
+  backlogRoot.onclick = onClick;
+
+  // Open task modal on card click (not on button)
+  plannedRoot.querySelectorAll(".task-card").forEach((card) => {
+    card.addEventListener("click", (e) => {
+      if (e.target.closest("[data-action]")) return;
+      const id = card.dataset.taskId;
+      const task = state.tasksById.get(id);
+      if (task) openTaskModal({ mode: "edit", task });
+    });
+    card.addEventListener("keydown", (e) => onCardKeyDown(e, card));
+    card.addEventListener("dragstart", onDragStart);
+    card.addEventListener("dragend", onDragEnd);
+  });
+  backlogRoot.querySelectorAll(".task-card").forEach((card) => {
+    card.addEventListener("click", (e) => {
+      if (e.target.closest("[data-action]")) return;
+      const id = card.dataset.taskId;
+      const task = state.tasksById.get(id);
+      if (task) openTaskModal({ mode: "edit", task });
+    });
+    card.addEventListener("keydown", (e) => onCardKeyDown(e, card));
+    card.addEventListener("dragstart", onDragStart);
+    card.addEventListener("dragend", onDragEnd);
+  });
+
+  // Drop zones (scrum planning)
+  const zones = [backlogRoot].concat(
+    [...plannedRoot.querySelectorAll(".planned-body")].filter(Boolean),
+  );
+  zones.forEach((zone) => {
+    zone.addEventListener("dragover", onDragOver);
+    zone.addEventListener("drop", onDrop);
+    zone.addEventListener("dragenter", (e) => {
+      if (state.filter.groupBy !== "none" || state.bulk.enabled) return;
+      e.preventDefault();
+      zone.style.outline = `2px dashed color-mix(in srgb, var(--accent) 55%, transparent)`;
+      zone.style.outlineOffset = "4px";
+    });
+    zone.addEventListener("dragleave", () => {
+      zone.style.outline = "";
+      zone.style.outlineOffset = "";
+    });
+  });
+}
+
+function renderTasks() {
+  const root = el("columns");
+  const tasks = filteredTasks();
+  const groupBy = state.filter.groupBy;
+  for (const status of COLUMN_IDS) {
+    const list = root.querySelector(`.task-list[data-status="${CSS.escape(status)}"]`);
+    if (!list) continue;
+    const columnTasks = tasks.filter((t) => t.status === status).sort(byOrderThenDate);
 
     if (groupBy === "none") {
       list.innerHTML = columnTasks.map(renderTaskCard).join("");
@@ -598,12 +924,9 @@ async function moveTask(taskId, toStatus, { source = "move" } = {}) {
 
   const before = { ...task };
   const ts = nowISO();
-  const nextInSprint =
-    state.viewMode === "scrum" && !task.inSprint && toStatus !== "todo" ? true : task.inSprint;
   const updated = normalizeTask({
     ...task,
     status: toStatus,
-    inSprint: nextInSprint,
     updatedAt: ts,
     order: nextOrderForStatus(toStatus),
     doneAt: toStatus === "done" ? (task.doneAt || ts) : task.doneAt || "",
@@ -621,6 +944,7 @@ async function moveTask(taskId, toStatus, { source = "move" } = {}) {
       timeoutMs: 6000,
     });
 
+    await recordActiveSprintSnapshot();
     renderColumns();
   } catch (err) {
     showToast(err?.message || "Move failed.", { kind: "error" });
@@ -631,7 +955,11 @@ async function reorderWithinStatus(taskId, direction) {
   const task = state.tasksById.get(taskId);
   if (!task) return;
   const list = state.tasks
-    .filter((t) => t.status === task.status)
+    .filter((t) => {
+      if (t.status !== task.status) return false;
+      if (state.viewMode === "scrum" && state.activeSprintId) return t.sprintId === state.activeSprintId;
+      return true;
+    })
     .sort(byOrderThenDate);
   const idx = list.findIndex((t) => t.id === taskId);
   if (idx < 0) return;
@@ -715,8 +1043,22 @@ function getDragAfterElement(container, y) {
 }
 
 function onDragStart(e) {
-  if (state.viewMode !== "kanban") return;
+  if (state.bulk.enabled) return;
+  if (state.filter.groupBy !== "none") return;
   const card = e.currentTarget;
+
+  if (state.viewMode === "scrum") {
+    const allowed = card.closest("#sprintColumns, #plannedSprints, #backlogList");
+    if (!allowed) return;
+    if (card.closest("#sprintColumns")) state.draggingFrom = { type: "activeSprint" };
+    else if (card.closest("#plannedSprints")) {
+      const sprintId = card.closest("[data-sprint-id]")?.dataset?.sprintId || "";
+      state.draggingFrom = { type: "plannedSprint", sprintId };
+    } else state.draggingFrom = { type: "backlog" };
+  } else {
+    state.draggingFrom = { type: "kanban" };
+  }
+
   state.draggingEl = card;
   card.classList.add("is-dragging");
   e.dataTransfer.effectAllowed = "move";
@@ -726,15 +1068,32 @@ function onDragStart(e) {
 function onDragEnd() {
   if (state.draggingEl) state.draggingEl.classList.remove("is-dragging");
   state.draggingEl = null;
+  state.draggingFrom = null;
   document.querySelectorAll(".task-list").forEach((l) => {
+    l.style.outline = "";
+    l.style.outlineOffset = "";
+  });
+  document.querySelectorAll(".backlog-list, .planned-body").forEach((l) => {
     l.style.outline = "";
     l.style.outlineOffset = "";
   });
 }
 
 function onDragOver(e) {
-  if (state.viewMode !== "kanban") return;
   if (state.filter.groupBy !== "none" || state.bulk.enabled) return;
+  if (state.viewMode === "scrum") {
+    const zone = e.currentTarget;
+    if (zone.classList.contains("task-list")) {
+      if (!state.activeSprintId) return;
+      if (!zone.closest("#sprintColumns")) return;
+    } else if (zone.id === "backlogList") {
+      // ok
+    } else if (zone.classList.contains("planned-body")) {
+      // ok
+    } else {
+      return;
+    }
+  }
   e.preventDefault();
   if (!state.draggingEl) return;
   const container = e.currentTarget;
@@ -744,16 +1103,23 @@ function onDragOver(e) {
 }
 
 async function onDrop(e) {
-  if (state.viewMode !== "kanban") return;
   if (state.filter.groupBy !== "none" || state.bulk.enabled) return;
   e.preventDefault();
   if (!state.draggingEl) return;
-  await persistTaskPositionsFromDOM();
+
+  if (state.viewMode !== "scrum") {
+    const root = e.currentTarget.closest(".columns") || el("columns");
+    await persistTaskPositionsFromDOM(root);
+    await reloadAndRerender();
+    return;
+  }
+
+  await persistScrumAssignmentsFromDOM();
   await reloadAndRerender();
 }
 
-async function persistTaskPositionsFromDOM() {
-  const root = el("columns");
+async function persistTaskPositionsFromDOM(rootEl, { defaultSprintId = null } = {}) {
+  const root = rootEl || el("columns");
   const updates = [];
   const touchedTaskIds = new Set();
 
@@ -779,7 +1145,8 @@ async function persistTaskPositionsFromDOM() {
       const existing = state.tasksById.get(taskId);
       if (!existing) return;
       touchedTaskIds.add(taskId);
-      if (existing.status !== status || existing.order !== idx) {
+      const nextSprintId = defaultSprintId != null ? defaultSprintId : existing.sprintId || "";
+      if (existing.status !== status || existing.order !== idx || (existing.sprintId || "") !== (nextSprintId || "")) {
         const ts = nowISO();
         updates.push(
           normalizeTask({
@@ -787,6 +1154,7 @@ async function persistTaskPositionsFromDOM() {
             status,
             order: idx,
             updatedAt: ts,
+            sprintId: nextSprintId,
             doneAt: status === "done" ? (existing.doneAt || ts) : existing.doneAt || "",
           }),
         );
@@ -801,6 +1169,7 @@ async function persistTaskPositionsFromDOM() {
     for (const t of updates) state.tasksById.set(t.id, t);
     state.tasks = [...state.tasksById.values()].sort(byOrderThenDate);
     await logEvent("task_dragdrop", { count: updates.length });
+    await recordActiveSprintSnapshot();
 
     state.undo = { type: "restore_tasks", tasks: before };
     showToast("Updated.", { actions: [{ label: "Undo", onClick: () => undoLast() }], timeoutMs: 5000 });
@@ -812,6 +1181,70 @@ async function persistTaskPositionsFromDOM() {
     const t = state.tasksById.get(id);
     if (!t) continue;
     if (t.order < 0) t.order = 0;
+  }
+}
+
+async function persistScrumAssignmentsFromDOM() {
+  const activeSprintId = state.activeSprintId || "";
+
+  // 1) Persist sprint board columns (status/order + sprint assignment)
+  if (activeSprintId) {
+    await persistTaskPositionsFromDOM(document.getElementById("sprintColumns"), { defaultSprintId: activeSprintId });
+  }
+
+  // 2) Persist planned sprint lists (assignment only)
+  const plannedRoot = document.getElementById("plannedSprints");
+  const backlogRoot = document.getElementById("backlogList");
+
+  const updates = [];
+  const scopeChanges = [];
+
+  if (plannedRoot) {
+    plannedRoot.querySelectorAll("[data-sprint-id] .planned-body").forEach((body) => {
+      const sprintId = body.closest("[data-sprint-id]")?.dataset?.sprintId || "";
+      if (!sprintId) return;
+      body.querySelectorAll(".task-card").forEach((card) => {
+        const id = card.dataset.taskId;
+        const existing = state.tasksById.get(id);
+        if (!existing) return;
+        if ((existing.sprintId || "") !== sprintId) {
+          const ts = nowISO();
+          updates.push(normalizeTask({ ...existing, sprintId, updatedAt: ts }));
+          scopeChanges.push({ taskId: existing.id, fromSprintId: existing.sprintId || "", toSprintId: sprintId });
+        }
+      });
+    });
+  }
+
+  // 3) Persist backlog list (assignment only)
+  if (backlogRoot) {
+    backlogRoot.querySelectorAll(".task-card").forEach((card) => {
+      const id = card.dataset.taskId;
+      const existing = state.tasksById.get(id);
+      if (!existing) return;
+      if (existing.sprintId) {
+        const ts = nowISO();
+        updates.push(normalizeTask({ ...existing, sprintId: "", updatedAt: ts }));
+        scopeChanges.push({ taskId: existing.id, fromSprintId: existing.sprintId || "", toSprintId: "" });
+      }
+    });
+  }
+
+  if (!updates.length) return;
+  try {
+    await saveTasks(updates);
+    for (const t of updates) state.tasksById.set(t.id, t);
+    state.tasks = [...state.tasksById.values()].sort(byOrderThenDate);
+
+    for (const change of scopeChanges) {
+      await noteSprintScopeChange(change);
+    }
+
+    await logEvent("task_sprint_assignment_drag", { count: updates.length });
+    await recordActiveSprintSnapshot();
+    showToast("Updated.", { timeoutMs: 2200 });
+  } catch (err) {
+    showToast(err?.message || "Update failed.", { kind: "error" });
   }
 }
 
@@ -860,7 +1293,9 @@ function closeOverlayModal(modalId, { force = false, confirmDirty = false } = {}
     !el("taskModal").hidden ||
     !el("settingsModal").hidden ||
     !el("insightsModal").hidden ||
-    !el("epicsModal").hidden;
+    !el("epicsModal").hidden ||
+    !el("sprintModal").hidden ||
+    !el("sprintReportModal").hidden;
   if (!anyOpen) {
     el("modalBackdrop").hidden = true;
     document.body.style.overflow = "";
@@ -874,7 +1309,11 @@ function closeOverlayModal(modalId, { force = false, confirmDirty = false } = {}
           ? "insightsModal"
           : !el("epicsModal").hidden
             ? "epicsModal"
-          : null;
+            : !el("sprintModal").hidden
+              ? "sprintModal"
+              : !el("sprintReportModal").hidden
+                ? "sprintReportModal"
+            : null;
   }
   return true;
 }
@@ -906,6 +1345,29 @@ function fillEpicOptions(selectEl, selectedId) {
   const opts = [`<option value="">None</option>`].concat(
     state.epics.map((e) => `<option value="${escapeText(e.id)}">${escapeText(e.name || "Epic")}</option>`),
   );
+  selectEl.innerHTML = opts.join("");
+  if (selectedId) selectEl.value = selectedId;
+}
+
+function fillSprintOptions(selectEl, selectedId) {
+  if (!selectEl) return;
+  const assignable = state.sprints.filter((s) => s.status !== "completed");
+  const selectedSprint = selectedId ? state.sprintsById.get(selectedId) : null;
+  if (!assignable.length) {
+    selectEl.innerHTML = `<option value="">Backlog (no sprints yet)</option>`;
+    selectEl.value = "";
+    return;
+  }
+  const opts = [`<option value="">Backlog</option>`].concat(
+    assignable.map((s) => `<option value="${escapeText(s.id)}">${escapeText(s.name || "Sprint")}</option>`),
+  );
+  if (selectedSprint && selectedSprint.status === "completed") {
+    opts.push(
+      `<option value="${escapeText(selectedSprint.id)}" disabled>${escapeText(
+        selectedSprint.name || "Completed sprint",
+      )} (completed)</option>`,
+    );
+  }
   selectEl.innerHTML = opts.join("");
   if (selectedId) selectEl.value = selectedId;
 }
@@ -1039,7 +1501,7 @@ function renderMarkdown(md) {
   return `<p>${joined}</p>`;
 }
 
-function openTaskModal({ mode, task, initialStatus }) {
+function openTaskModal({ mode, task, initialStatus, initialSprintId }) {
   const idInput = el("taskId");
   const titleInput = el("taskTitle");
   const descInput = el("taskDescription");
@@ -1054,10 +1516,11 @@ function openTaskModal({ mode, task, initialStatus }) {
   const blocked = document.getElementById("taskBlocked");
   const duplicateBtn = document.getElementById("duplicateTaskBtn");
   const epicSelect = document.getElementById("taskEpic");
-  const inSprint = document.getElementById("taskInSprint");
+  const sprintSelect = document.getElementById("taskSprint");
 
   fillStatusOptions(statusSelect);
   fillEpicOptions(epicSelect, task?.epicId || "");
+  fillSprintOptions(sprintSelect, task?.sprintId || "");
 
   if (mode === "edit" && task) {
     el("taskModalTitle").textContent = "Edit task";
@@ -1071,8 +1534,8 @@ function openTaskModal({ mode, task, initialStatus }) {
     if (due) due.value = task.dueDate ? String(task.dueDate).slice(0, 10) : "";
     if (labels) labels.value = (task.labels || []).join(", ");
     if (blocked) blocked.checked = Boolean(task.blocked);
-    if (inSprint) inSprint.checked = Boolean(task.inSprint);
     if (epicSelect) epicSelect.value = task.epicId || "";
+    if (sprintSelect) sprintSelect.value = task.sprintId || "";
     renderChecklist(task.checklist || []);
     renderAttachments(task.attachments || []);
     deleteBtn.hidden = false;
@@ -1090,8 +1553,8 @@ function openTaskModal({ mode, task, initialStatus }) {
     if (due) due.value = "";
     if (labels) labels.value = "";
     if (blocked) blocked.checked = false;
-    if (inSprint) inSprint.checked = state.viewMode !== "scrum";
     if (epicSelect) epicSelect.value = "";
+    if (sprintSelect) sprintSelect.value = initialSprintId || "";
     renderChecklist([]);
     renderAttachments([]);
     deleteBtn.hidden = true;
@@ -1111,7 +1574,11 @@ function openTaskModal({ mode, task, initialStatus }) {
 }
 
 function nextOrderForStatus(status) {
-  const tasks = state.tasks.filter((t) => t.status === status);
+  const tasks = state.tasks.filter((t) => {
+    if (t.status !== status) return false;
+    if (state.viewMode === "scrum" && state.activeSprintId) return t.sprintId === state.activeSprintId;
+    return true;
+  });
   const max = tasks.reduce((m, t) => Math.max(m, typeof t.order === "number" ? t.order : 0), -1);
   return max + 1;
 }
@@ -1129,7 +1596,7 @@ async function onSaveTask(e) {
   const dueDate = dueRaw ? `${dueRaw}T00:00:00.000Z` : "";
   const labels = parseLabels(document.getElementById("taskLabels")?.value || "");
   const epicId = document.getElementById("taskEpic")?.value || "";
-  const inSprint = Boolean(document.getElementById("taskInSprint")?.checked);
+  const sprintId = document.getElementById("taskSprint")?.value || "";
   const blocked = Boolean(document.getElementById("taskBlocked")?.checked);
   const checklist = readChecklistFromUI();
   const attachments = readAttachmentsFromUI();
@@ -1145,7 +1612,6 @@ async function onSaveTask(e) {
 
   let statusChanged = existing && existing.status !== status;
 
-  if (state.viewMode === "scrum" && !inSprint) status = "todo";
   statusChanged = existing && existing.status !== status;
 
   if (!canPlaceInStatus(status, { excludingTaskId: existing?.id || null })) {
@@ -1165,7 +1631,7 @@ async function onSaveTask(e) {
     color,
     assignee,
     epicId,
-    inSprint,
+    sprintId,
     dueDate,
     labels,
     blocked,
@@ -1179,6 +1645,13 @@ async function onSaveTask(e) {
 
   try {
     await saveTask(task);
+    if (existing && (existing.sprintId || "") !== (task.sprintId || "")) {
+      await noteSprintScopeChange({
+        fromSprintId: existing.sprintId || "",
+        toSprintId: task.sprintId || "",
+        taskId: task.id,
+      });
+    }
     state.tasksById.set(task.id, task);
     state.tasks = [...state.tasksById.values()].sort(byOrderThenDate);
 
@@ -1191,6 +1664,7 @@ async function onSaveTask(e) {
     state.modal.dirty = false;
     closeModal({ force: true });
     showToast("Saved.", { timeoutMs: 2200 });
+    await recordActiveSprintSnapshot();
     renderColumns();
   } catch (err) {
     showToast(err?.message || "Save failed.", { kind: "error" });
@@ -1276,6 +1750,7 @@ async function reloadAndRerender() {
   await loadBoardsAndActive();
   await loadTasks();
   await loadEpics();
+  await loadSprints();
   renderBoardSelect();
   const groupBy = document.getElementById("groupBy");
   if (groupBy) groupBy.value = state.filter.groupBy;
@@ -1283,7 +1758,7 @@ async function reloadAndRerender() {
   if (viewMode) viewMode.value = state.viewMode;
   syncViewModeUi();
   renderBulkBar();
-  renderColumns();
+  render();
 }
 
 async function onQuickAdd() {
@@ -1309,6 +1784,8 @@ async function onQuickAdd() {
     priority: "",
     color: "#4f46e5",
     assignee: "",
+    epicId: "",
+    sprintId: "",
     dueDate: "",
     labels: [],
     blocked: false,
@@ -1455,7 +1932,7 @@ function openSettingsModal() {
       return `
         <div class="grid-row">
           <div class="field-label">${escapeText(label)} policy</div>
-          <textarea class="textarea" rows="2" data-policy="${escapeText(c)}" placeholder="Optional policy…">${escapeText(
+          <textarea class="textarea" rows="2" data-policy="${escapeText(c)}" placeholder="Optional policy.">${escapeText(
             v,
           )}</textarea>
         </div>
@@ -1590,7 +2067,7 @@ async function openInsightsModal() {
         <div class="section-title">Cycle time (Created -> Done)</div>
         <div class="list">
           <div class="list-item"><div class="list-item-left"><div class="list-item-text">Completed tasks</div></div><div class="muted">${cycleMs.length}</div></div>
-          <div class="list-item"><div class="list-item-left"><div class="list-item-text">Average</div></div><div class="muted">${cycleMs.length ? formatDuration(avg) : "—"}</div></div>
+          <div class="list-item"><div class="list-item-left"><div class="list-item-text">Average</div></div><div class="muted">${cycleMs.length ? formatDuration(avg) : "-"}</div></div>
           <div class="list-item"><div class="list-item-left"><div class="list-item-text">Median (P50)</div></div><div class="muted">${cycleMs.length ? formatDuration(p50) : "-"}</div></div>
           <div class="list-item"><div class="list-item-left"><div class="list-item-text">P90</div></div><div class="muted">${cycleMs.length ? formatDuration(p90) : "-"}</div></div>
         </div>
@@ -1707,6 +2184,287 @@ async function createEpicFromName(name) {
   await logEvent("epic_created", { epicId: epic.id });
   await loadEpics();
   return epic;
+}
+
+function todayDate() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+async function createSprint({ name, startDate, endDate }) {
+  const trimmed = String(name || "").trim();
+  if (!trimmed) return null;
+  const sprint = {
+    id: makeId(),
+    boardId: state.activeBoardId,
+    name: trimmed,
+    status: "planned",
+    startDate: startDate || "",
+    endDate: endDate || "",
+    createdAt: nowISO(),
+    startedAt: "",
+    completedAt: "",
+    committedTaskIds: [],
+    addedTaskIds: [],
+    removedTaskIds: [],
+  };
+  await saveSprint(sprint);
+  await logEvent("sprint_created", { sprintId: sprint.id });
+  await loadSprints();
+  return sprint;
+}
+
+async function recordActiveSprintSnapshot() {
+  const active = getActiveSprint();
+  if (!active) return;
+  const date = todayDate();
+  const sprintTasks = state.tasks.filter((t) => t.sprintId === active.id);
+  const remaining = sprintTasks.filter((t) => t.status !== "done").length;
+  const done = sprintTasks.filter((t) => t.status === "done").length;
+  const total = sprintTasks.length;
+  await upsertSprintSnapshot({
+    id: `${active.id}_${date}`,
+    boardId: state.activeBoardId,
+    sprintId: active.id,
+    date,
+    remaining,
+    done,
+    total,
+    ts: nowISO(),
+  });
+}
+
+async function startSprint(sprintId) {
+  const selected = state.sprintsById.get(sprintId);
+  if (!selected) return;
+  if (getActiveSprint()) {
+    showToast("A sprint is already active.", { kind: "error" });
+    return;
+  }
+  if (selected.status !== "planned") {
+    showToast("Only planned sprints can be started.", { kind: "error" });
+    return;
+  }
+
+  const startedAt = nowISO();
+  const startDate = selected.startDate || todayDate();
+  const committed = state.tasks.filter((t) => t.sprintId === selected.id).map((t) => t.id);
+
+  const updated = {
+    ...selected,
+    status: "active",
+    startedAt,
+    startDate,
+    committedTaskIds: committed,
+    addedTaskIds: [],
+    removedTaskIds: [],
+    updatedAt: startedAt,
+  };
+
+  await saveSprint(updated);
+  await updateBoardSettings(state.activeBoardId, { viewMode: "scrum", activeSprintId: selected.id });
+  await logEvent("sprint_started", { sprintId: selected.id, committed: committed.length });
+
+  await reloadAndRerender();
+  await recordActiveSprintSnapshot();
+  showToast("Sprint started.", { timeoutMs: 2200 });
+}
+
+async function completeActiveSprint() {
+  const active = getActiveSprint();
+  if (!active) return;
+  if (!confirm(`Complete sprint "${active.name}"? Incomplete issues will move to backlog.`)) return;
+
+  const completedAt = nowISO();
+  const updatedSprint = { ...active, status: "completed", completedAt, updatedAt: completedAt };
+
+  const movedOut = state.tasks
+    .filter((t) => t.sprintId === active.id && t.status !== "done")
+    .map((t) => normalizeTask({ ...t, sprintId: "", updatedAt: completedAt }));
+
+  await saveSprint(updatedSprint);
+  if (movedOut.length) await saveTasks(movedOut);
+  await updateBoardSettings(state.activeBoardId, { activeSprintId: null });
+  await logEvent("sprint_completed", { sprintId: active.id, movedToBacklog: movedOut.length });
+
+  await reloadAndRerender();
+  showToast("Sprint completed.", { timeoutMs: 2200 });
+}
+
+async function deletePlannedSprint(sprintId) {
+  const sprint = state.sprintsById.get(sprintId);
+  if (!sprint) return;
+  if (sprint.status !== "planned") {
+    showToast("Only planned sprints can be deleted.", { kind: "error" });
+    return;
+  }
+  if (!confirm(`Delete sprint "${sprint.name}"? Issues will move to backlog.`)) return;
+
+  const ts = nowISO();
+  const moved = state.tasks.filter((t) => t.sprintId === sprint.id).map((t) => normalizeTask({ ...t, sprintId: "", updatedAt: ts }));
+  if (moved.length) await saveTasks(moved);
+  await deleteSprint(sprint.id);
+  await logEvent("sprint_deleted", { sprintId: sprint.id, movedToBacklog: moved.length });
+  await reloadAndRerender();
+  showToast("Sprint deleted.", { timeoutMs: 2200 });
+}
+
+async function noteSprintScopeChange({ fromSprintId, toSprintId, taskId }) {
+  const active = getActiveSprint();
+  if (!active) return;
+  if (active.status !== "active") return;
+
+  const sprint = state.sprintsById.get(active.id);
+  if (!sprint) return;
+
+  const committed = new Set(sprint.committedTaskIds || []);
+  sprint.addedTaskIds = Array.isArray(sprint.addedTaskIds) ? sprint.addedTaskIds : [];
+  sprint.removedTaskIds = Array.isArray(sprint.removedTaskIds) ? sprint.removedTaskIds : [];
+
+  if (toSprintId === active.id && fromSprintId !== active.id) {
+    if (!committed.has(taskId) && !sprint.addedTaskIds.includes(taskId)) sprint.addedTaskIds.push(taskId);
+  }
+  if (fromSprintId === active.id && toSprintId !== active.id) {
+    if (!sprint.removedTaskIds.includes(taskId)) sprint.removedTaskIds.push(taskId);
+  }
+
+  await saveSprint({ ...sprint, updatedAt: nowISO() });
+  await loadSprints();
+}
+
+async function addTaskToSprint(taskId, sprintId) {
+  const task = state.tasksById.get(taskId);
+  if (!task) return;
+  const sprint = state.sprintsById.get(sprintId);
+  if (!sprintId || !sprint) {
+    showToast("Select a sprint to add the issue.", { kind: "error" });
+    return;
+  }
+  if (sprint.status === "completed") {
+    showToast("Cannot add issues to a completed sprint.", { kind: "error" });
+    return;
+  }
+  const ts = nowISO();
+  const updated = normalizeTask({ ...task, sprintId: sprint.id, updatedAt: ts });
+  try {
+    await saveTask(updated);
+    await noteSprintScopeChange({ fromSprintId: task.sprintId || "", toSprintId: sprint.id, taskId });
+    state.tasksById.set(updated.id, updated);
+    state.tasks = [...state.tasksById.values()].sort(byOrderThenDate);
+    await logEvent("task_sprint_changed", { taskId, from: task.sprintId || "", to: sprint.id });
+    await recordActiveSprintSnapshot();
+    render();
+  } catch (err) {
+    showToast(err?.message || "Failed to add to sprint.", { kind: "error" });
+  }
+}
+
+async function removeTaskFromSprint(taskId) {
+  const task = state.tasksById.get(taskId);
+  if (!task) return;
+  const ts = nowISO();
+  const updated = normalizeTask({ ...task, sprintId: "", updatedAt: ts });
+  try {
+    await saveTask(updated);
+    await noteSprintScopeChange({ fromSprintId: task.sprintId || "", toSprintId: "", taskId });
+    state.tasksById.set(updated.id, updated);
+    state.tasks = [...state.tasksById.values()].sort(byOrderThenDate);
+    await logEvent("task_sprint_changed", { taskId, from: task.sprintId || "", to: "" });
+    await recordActiveSprintSnapshot();
+    render();
+  } catch (err) {
+    showToast(err?.message || "Failed to remove from sprint.", { kind: "error" });
+  }
+}
+
+function sprintDisplayName(sprint) {
+  if (!sprint) return "";
+  const tag = sprint.status === "active" ? " (active)" : sprint.status === "completed" ? " (completed)" : "";
+  return `${sprint.name || "Sprint"}${tag}`;
+}
+
+function isTaskDone(task) {
+  return task && task.status === "done";
+}
+
+function unique(list) {
+  return [...new Set((list || []).filter(Boolean))];
+}
+
+function openSprintReportModal() {
+  const modal = document.getElementById("sprintReportModal");
+  const select = document.getElementById("reportSprintSelect");
+  if (!modal || !select) return;
+  const preferred = document.getElementById("activeSprintSelect")?.value || state.activeSprintId || state.sprints[0]?.id || "";
+  renderSprintSelectOptions(select, preferred);
+  openOverlayModal("sprintReportModal");
+  renderSprintReport(select.value);
+}
+
+async function renderSprintReport(sprintId) {
+  const body = document.getElementById("sprintReportBody");
+  if (!body) return;
+  const sprint = state.sprintsById.get(sprintId) || null;
+  if (!sprint) {
+    body.innerHTML = `<div class="muted">No sprint selected.</div>`;
+    return;
+  }
+
+  const committed = unique(sprint.committedTaskIds);
+  const added = unique(sprint.addedTaskIds);
+  const removed = unique(sprint.removedTaskIds);
+
+  const committedDone = committed.filter((id) => isTaskDone(state.tasksById.get(id))).length;
+  const addedDone = added.filter((id) => isTaskDone(state.tasksById.get(id))).length;
+
+  const sprintTasksNow = state.tasks.filter((t) => t.sprintId === sprint.id);
+  const doneNow = sprintTasksNow.filter((t) => t.status === "done").length;
+  const remainingNow = sprintTasksNow.filter((t) => t.status !== "done").length;
+
+  const snapshots = await getSprintSnapshots(sprint.id);
+  const snapRows =
+    snapshots.length === 0
+      ? `<div class="muted" style="font-size:13px;">No burndown data yet (it records while a sprint is active).</div>`
+      : snapshots
+          .map((s) => {
+            const pct = s.total ? Math.round((s.remaining / Math.max(1, s.total)) * 100) : 0;
+            return `
+              <div class="list-item">
+                <div class="list-item-left">
+                  <div class="list-item-text">${escapeText(s.date)}</div>
+                </div>
+                <div class="muted">Remaining: ${s.remaining} / ${s.total} (${pct}%)</div>
+              </div>
+            `;
+          })
+          .join("");
+
+  body.innerHTML = `
+    <div class="section">
+      <div class="section-title">Sprint</div>
+      <div class="list">
+        <div class="list-item"><div class="list-item-left"><div class="list-item-text">${escapeText(
+          sprintDisplayName(sprint),
+        )}</div></div><div class="muted">${escapeText(formatSprintRange(sprint))}</div></div>
+      </div>
+    </div>
+    <div class="section">
+      <div class="section-title">Report</div>
+      <div class="list">
+        <div class="list-item"><div class="list-item-left"><div class="list-item-text">Committed at start</div></div><div class="muted">${committed.length}</div></div>
+        <div class="list-item"><div class="list-item-left"><div class="list-item-text">Committed completed</div></div><div class="muted">${committedDone}</div></div>
+        <div class="list-item"><div class="list-item-left"><div class="list-item-text">Added during sprint</div></div><div class="muted">${added.length}</div></div>
+        <div class="list-item"><div class="list-item-left"><div class="list-item-text">Added completed</div></div><div class="muted">${addedDone}</div></div>
+        <div class="list-item"><div class="list-item-left"><div class="list-item-text">Removed from sprint</div></div><div class="muted">${removed.length}</div></div>
+        <div class="list-item"><div class="list-item-left"><div class="list-item-text">Now in sprint</div></div><div class="muted">${sprintTasksNow.length} (done ${doneNow}, remaining ${remainingNow})</div></div>
+      </div>
+    </div>
+    <div class="section">
+      <div class="section-title">Burndown</div>
+      <div class="list">
+        ${snapRows}
+      </div>
+    </div>
+  `;
 }
 
 async function onBulkMove() {
@@ -1861,6 +2619,49 @@ function wireEvents() {
   document.getElementById("boardSettingsBtn")?.addEventListener("click", openSettingsModal);
   document.getElementById("insightsBtn")?.addEventListener("click", openInsightsModal);
   document.getElementById("epicsBtn")?.addEventListener("click", openEpicsModal);
+  document.getElementById("newSprintBtn")?.addEventListener("click", () => {
+    const name = document.getElementById("sprintName");
+    const sd = document.getElementById("sprintStartDate");
+    const ed = document.getElementById("sprintEndDate");
+    if (name) name.value = `Sprint ${todayDate()}`;
+    if (sd) sd.value = "";
+    if (ed) ed.value = "";
+    openOverlayModal("sprintModal");
+  });
+  document.getElementById("closeSprintBtn")?.addEventListener("click", () => closeOverlayModal("sprintModal", { force: true }));
+  document.getElementById("sprintForm")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const name = document.getElementById("sprintName")?.value || "";
+    const startDate = document.getElementById("sprintStartDate")?.value || "";
+    const endDate = document.getElementById("sprintEndDate")?.value || "";
+    const sprint = await createSprint({ name, startDate, endDate });
+    if (!sprint) return;
+    closeOverlayModal("sprintModal", { force: true });
+    await reloadAndRerender();
+    showToast("Sprint created.", { timeoutMs: 2200 });
+  });
+
+  document.getElementById("activeSprintSelect")?.addEventListener("change", () => {
+    renderScrumControls();
+    renderScrumBacklog();
+  });
+  document.getElementById("startSprintBtn")?.addEventListener("click", async () => {
+    const id = document.getElementById("activeSprintSelect")?.value || "";
+    if (!id) return;
+    await startSprint(id);
+  });
+  document.getElementById("completeSprintBtn")?.addEventListener("click", completeActiveSprint);
+  document.getElementById("sprintReportBtn")?.addEventListener("click", () => openSprintReportModal());
+  document.getElementById("newBacklogIssueBtn")?.addEventListener("click", () =>
+    openTaskModal({ mode: "new", initialStatus: "todo", initialSprintId: "" }),
+  );
+  document.getElementById("closeSprintReportBtn")?.addEventListener("click", () =>
+    closeOverlayModal("sprintReportModal", { force: true }),
+  );
+  document.getElementById("reportSprintSelect")?.addEventListener("change", (e) => {
+    const id = e.target.value;
+    renderSprintReport(id);
+  });
 
   document.getElementById("closeSettingsBtn")?.addEventListener("click", () => closeOverlayModal("settingsModal", { force: true }));
   document.getElementById("settingsForm")?.addEventListener("submit", onSaveSettings);
@@ -1889,6 +2690,8 @@ function wireEvents() {
     else if (!el("settingsModal").hidden) closeOverlayModal("settingsModal", { force: true });
     else if (!el("insightsModal").hidden) closeOverlayModal("insightsModal", { force: true });
     else if (!el("epicsModal").hidden) closeOverlayModal("epicsModal", { force: true });
+    else if (!el("sprintModal").hidden) closeOverlayModal("sprintModal", { force: true });
+    else if (!el("sprintReportModal").hidden) closeOverlayModal("sprintReportModal", { force: true });
   });
   el("taskForm").addEventListener("submit", onSaveTask);
   el("deleteTaskBtn").addEventListener("click", onDeleteTask);
@@ -1959,7 +2762,7 @@ function wireEvents() {
     "taskDueDate",
     "taskEpic",
     "taskLabels",
-    "taskInSprint",
+    "taskSprint",
     "taskBlocked",
   ].forEach((id) => {
     const node = document.getElementById(id);
@@ -1974,13 +2777,21 @@ function wireEvents() {
     else if (!el("settingsModal").hidden) closeOverlayModal("settingsModal", { force: true });
     else if (!el("insightsModal").hidden) closeOverlayModal("insightsModal", { force: true });
     else if (!el("epicsModal").hidden) closeOverlayModal("epicsModal", { force: true });
+    else if (!el("sprintModal").hidden) closeOverlayModal("sprintModal", { force: true });
+    else if (!el("sprintReportModal").hidden) closeOverlayModal("sprintReportModal", { force: true });
   });
 
-  el("columns").addEventListener("click", (e) => {
+  const onAddClick = (e) => {
     const btn = e.target.closest(".add-task-btn");
     if (!btn) return;
-    openTaskModal({ mode: "new", initialStatus: btn.dataset.status });
-  });
+    openTaskModal({
+      mode: "new",
+      initialStatus: btn.dataset.status,
+      initialSprintId: btn.dataset.sprintId || "",
+    });
+  };
+  el("columns").addEventListener("click", onAddClick);
+  document.getElementById("sprintColumns")?.addEventListener("click", onAddClick);
 }
 
 async function registerServiceWorker() {
@@ -2031,6 +2842,7 @@ async function main() {
   await loadBoardsAndActive();
   await loadTasks();
   await loadEpics();
+  await loadSprints();
   wireEvents();
   renderBoardSelect();
   const groupBy = document.getElementById("groupBy");
@@ -2039,8 +2851,16 @@ async function main() {
   if (viewMode) viewMode.value = state.viewMode;
   syncViewModeUi();
   renderBulkBar();
-  renderColumns();
+  render();
   state.swRegistration = await registerServiceWorker();
 }
 
-main();
+main().catch((err) => {
+  console.error(err);
+  try {
+    showToast(err?.message || "App failed to start.", { kind: "error", timeoutMs: 12000 });
+  } catch {}
+  try {
+    alert(err?.message || "App failed to start. See console for details.");
+  } catch {}
+});

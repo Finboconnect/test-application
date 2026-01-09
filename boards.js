@@ -1,4 +1,4 @@
-import { getBoards, getSetting, makeId, saveBoard, setSetting, deleteBoard } from "./db.js?v=2026-01-09-2";
+import { getBoards, getSetting, makeId, saveBoard, setSetting, deleteBoard } from "./db.js?v=2026-01-09-5";
 
 export const COLUMN_IDS = ["todo", "inprogress", "review", "test", "done"];
 
@@ -26,6 +26,7 @@ export function makeBoard(name) {
     columnPolicies: Object.fromEntries(COLUMN_IDS.map((c) => [c, ""])),
     groupBy: "none",
     viewMode: "kanban",
+    activeSprintId: null,
     createdAt: timestamp,
     updatedAt: timestamp,
   };
@@ -67,7 +68,7 @@ export async function renameBoard(boardId, name) {
   return board;
 }
 
-export async function updateBoardSettings(boardId, { wipLimits, columnPolicies, groupBy, viewMode }) {
+export async function updateBoardSettings(boardId, { wipLimits, columnPolicies, groupBy, viewMode, activeSprintId }) {
   const boards = await getBoards();
   const board = boards.find((b) => b.id === boardId);
   if (!board) throw new Error("Board not found");
@@ -76,6 +77,7 @@ export async function updateBoardSettings(boardId, { wipLimits, columnPolicies, 
   if (columnPolicies && typeof columnPolicies === "object") board.columnPolicies = columnPolicies;
   if (groupBy) board.groupBy = groupBy;
   if (viewMode === "kanban" || viewMode === "scrum") board.viewMode = viewMode;
+  if (activeSprintId === null || typeof activeSprintId === "string") board.activeSprintId = activeSprintId;
 
   board.updatedAt = nowISO();
   await saveBoard(board);

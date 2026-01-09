@@ -1,10 +1,10 @@
 :root {
-  --bg: #f4f5f7;
-  --surface: #ffffff;
-  --surface-2: #ebecf0;
+  --bg: #eef2f7;
+  --surface: #f8fafc;
+  --surface-2: #e5eaf2;
   --text: #172b4d;
   --muted: #6b778c;
-  --border: #dfe1e6;
+  --border: #cfd8e3;
   --shadow: 0 12px 28px rgba(17, 24, 39, 0.12);
   --accent: #0052cc;
   --accent-2: #0065ff;
@@ -12,7 +12,7 @@
   --radius: 14px;
   --radius-sm: 10px;
   --transition: 180ms ease;
-  --header-bg: #0747a6;
+  --header-bg: #07357f;
   --header-text: #ffffff;
   --header-border: rgba(255, 255, 255, 0.22);
   --font: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial,
@@ -146,6 +146,80 @@ body {
   padding: 14px 16px 20px;
 }
 
+.scrum-section {
+  display: grid;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.scrum-bar {
+  display: flex;
+  gap: 12px;
+  align-items: flex-end;
+  justify-content: space-between;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.scrum-title {
+  font-weight: 900;
+  letter-spacing: -0.01em;
+}
+
+.scrum-controls {
+  display: flex;
+  gap: 8px;
+  align-items: flex-end;
+  flex-wrap: wrap;
+}
+
+.planned {
+  display: grid;
+  gap: 12px;
+}
+
+.planned-sprint {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.planned-header {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--surface-2) 80%, transparent);
+}
+
+.planned-name {
+  font-weight: 800;
+}
+
+.planned-body {
+  padding: 10px 12px;
+  display: grid;
+  gap: 10px;
+}
+
+.backlog-list {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  padding: 10px 12px;
+  display: grid;
+  gap: 10px;
+}
+
+.backlog-list .task-card {
+  cursor: pointer;
+}
+
 .banner {
   display: flex;
   gap: 12px;
@@ -173,12 +247,8 @@ body {
   -webkit-overflow-scrolling: touch;
 }
 
-.columns.is-scrum {
-  grid-template-columns: repeat(6, minmax(260px, 1fr));
-}
-
 .column {
-  background: color-mix(in srgb, var(--surface) 92%, transparent);
+  background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   box-shadow: var(--shadow);
@@ -194,6 +264,7 @@ body {
   gap: 12px;
   padding: 12px;
   border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--surface-2) 64%, transparent);
 }
 
 .column-title {
@@ -685,10 +756,6 @@ body {
   .columns {
     grid-template-columns: repeat(5, minmax(240px, 1fr));
   }
-
-  .columns.is-scrum {
-    grid-template-columns: repeat(6, minmax(240px, 1fr));
-  }
 }
 
 @media (max-width: 640px) {
@@ -708,10 +775,6 @@ body {
     grid-template-columns: repeat(5, minmax(84vw, 1fr));
     scroll-snap-type: x mandatory;
     scroll-padding: 12px;
-  }
-
-  .columns.is-scrum {
-    grid-template-columns: repeat(6, minmax(84vw, 1fr));
   }
 
   .column {

@@ -1,0 +1,6 @@
+services:
+  kanban:
+    build: .
+    container_name: kanban-local
+    ports:
+      - "8080:80"

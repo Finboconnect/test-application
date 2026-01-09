@@ -1,5 +1,5 @@
 const DB_NAME = "kanbanDB";
-const DB_VERSION = 3;
+const DB_VERSION = 4;
 
 let dbPromise;
 
@@ -23,6 +23,11 @@ function openDB() {
 
   dbPromise = new Promise((resolve, reject) => {
     const request = indexedDB.open(DB_NAME, DB_VERSION);
+
+    const fail = (err) => {
+      dbPromise = null;
+      reject(err);
+    };
 
     request.onupgradeneeded = () => {
       const db = request.result;
@@ -53,10 +58,33 @@ function openDB() {
         const epics = db.createObjectStore("epics", { keyPath: "id" });
         epics.createIndex("boardId", "boardId", { unique: false });
       }
+
+      if (!db.objectStoreNames.contains("sprints")) {
+        const sprints = db.createObjectStore("sprints", { keyPath: "id" });
+        sprints.createIndex("boardId", "boardId", { unique: false });
+        sprints.createIndex("boardId_status", ["boardId", "status"], { unique: false });
+      }
+
+      if (!db.objectStoreNames.contains("sprintSnapshots")) {
+        const snaps = db.createObjectStore("sprintSnapshots", { keyPath: "id" });
+        snaps.createIndex("sprintId", "sprintId", { unique: false });
+        snaps.createIndex("sprintId_date", ["sprintId", "date"], { unique: true });
+      }
     };
 
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
+    request.onblocked = () =>
+      fail(new Error("IndexedDB upgrade blocked. Close other tabs for this site and reload."));
+
+    request.onsuccess = () => {
+      const db = request.result;
+      db.onversionchange = () => {
+        try {
+          db.close();
+        } catch {}
+      };
+      resolve(db);
+    };
+    request.onerror = () => fail(request.error || new Error("IndexedDB open failed"));
   });
 
   return dbPromise;
@@ -130,13 +158,33 @@ async function deleteRowsByIndexInTx({ tx, storeName, indexName, value }) {
   });
 }
 
+async function deleteSprintsByBoardIdInTx(tx, boardId) {
+  const store = tx.objectStore("sprints");
+  const index = store.index("boardId");
+  const range = IDBKeyRange.only(boardId);
+
+  return new Promise((resolve, reject) => {
+    const cursorRequest = index.openCursor(range);
+    cursorRequest.onerror = () => reject(cursorRequest.error);
+    cursorRequest.onsuccess = async () => {
+      const cursor = cursorRequest.result;
+      if (!cursor) return resolve();
+      const sprintId = cursor.primaryKey;
+      cursor.delete();
+      await deleteRowsByIndexInTx({ tx, storeName: "sprintSnapshots", indexName: "sprintId", value: sprintId });
+      cursor.continue();
+    };
+  });
+}
+
 export async function deleteBoard(boardId) {
   const db = await openDB();
-  const tx = db.transaction(["boards", "tasks", "events", "epics"], "readwrite");
+  const tx = db.transaction(["boards", "tasks", "events", "epics", "sprints", "sprintSnapshots"], "readwrite");
   await requestToPromise(tx.objectStore("boards").delete(boardId));
   await deleteTasksByBoardIdInTx(tx, boardId);
   await deleteRowsByIndexInTx({ tx, storeName: "events", indexName: "boardId", value: boardId });
   await deleteRowsByIndexInTx({ tx, storeName: "epics", indexName: "boardId", value: boardId });
+  await deleteSprintsByBoardIdInTx(tx, boardId);
   await txToPromise(tx);
 }
 
@@ -247,4 +295,49 @@ export async function deleteEpic(epicId) {
   const tx = db.transaction(["epics"], "readwrite");
   await requestToPromise(tx.objectStore("epics").delete(epicId));
   await txToPromise(tx);
+}
+
+export async function getSprints(boardId) {
+  const db = await openDB();
+  const tx = db.transaction(["sprints"], "readonly");
+  const store = tx.objectStore("sprints");
+  const index = store.index("boardId");
+  const sprints = await requestToPromise(index.getAll(IDBKeyRange.only(boardId)));
+  await txToPromise(tx);
+  return sprints;
+}
+
+export async function saveSprint(sprint) {
+  const db = await openDB();
+  const tx = db.transaction(["sprints"], "readwrite");
+  await requestToPromise(tx.objectStore("sprints").put(sprint));
+  await txToPromise(tx);
+  return sprint;
+}
+
+export async function deleteSprint(sprintId) {
+  const db = await openDB();
+  const tx = db.transaction(["sprints", "sprintSnapshots"], "readwrite");
+  await requestToPromise(tx.objectStore("sprints").delete(sprintId));
+  await deleteRowsByIndexInTx({ tx, storeName: "sprintSnapshots", indexName: "sprintId", value: sprintId });
+  await txToPromise(tx);
+}
+
+export async function getSprintSnapshots(sprintId) {
+  const db = await openDB();
+  const tx = db.transaction(["sprintSnapshots"], "readonly");
+  const store = tx.objectStore("sprintSnapshots");
+  const index = store.index("sprintId");
+  const rows = await requestToPromise(index.getAll(IDBKeyRange.only(sprintId)));
+  await txToPromise(tx);
+  rows.sort((a, b) => String(a.date).localeCompare(String(b.date)));
+  return rows;
+}
+
+export async function upsertSprintSnapshot(snapshot) {
+  const db = await openDB();
+  const tx = db.transaction(["sprintSnapshots"], "readwrite");
+  await requestToPromise(tx.objectStore("sprintSnapshots").put(snapshot));
+  await txToPromise(tx);
+  return snapshot;
 }
