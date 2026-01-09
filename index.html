@@ -1,0 +1,278 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Kanban</title>
+    <meta name="color-scheme" content="light dark" />
+    <link rel="stylesheet" href="style.css?v=2026-01-09-1" />
+  </head>
+  <body>
+    <header class="app-header">
+      <div class="brand">
+        <div class="brand-title">Kanban</div>
+        <div class="brand-subtitle">Offline • IndexedDB • Multi-board</div>
+      </div>
+
+      <div class="toolbar" role="toolbar" aria-label="Kanban controls">
+        <label class="field">
+          <span class="field-label">Board</span>
+          <select id="boardSelect" class="select" aria-label="Select board"></select>
+        </label>
+
+        <div class="toolbar-buttons">
+          <button id="newBoardBtn" class="btn" type="button">New board</button>
+          <button id="renameBoardBtn" class="btn" type="button">Rename</button>
+          <button id="deleteBoardBtn" class="btn btn-danger" type="button">Delete</button>
+        </div>
+
+        <label class="field">
+          <span class="field-label">Quick add (To Do)</span>
+          <div class="inline">
+            <input id="quickAddTitle" class="input" type="text" placeholder="Task title…" maxlength="120" />
+            <button id="quickAddBtn" class="btn btn-primary" type="button">Add</button>
+          </div>
+        </label>
+
+        <label class="field">
+          <span class="field-label">Search</span>
+          <input id="searchInput" class="input" type="search" placeholder="Title, tags, assignee…" />
+        </label>
+
+        <label class="field">
+          <span class="field-label">Priority</span>
+          <select id="priorityFilter" class="select" aria-label="Filter by priority">
+            <option value="">All</option>
+            <option value="high">High</option>
+            <option value="medium">Medium</option>
+            <option value="low">Low</option>
+            <option value="none">None</option>
+          </select>
+        </label>
+
+        <label class="field">
+          <span class="field-label">Group</span>
+          <select id="groupBy" class="select" aria-label="Group tasks">
+            <option value="none">None</option>
+            <option value="priority">Priority</option>
+            <option value="label">Label</option>
+          </select>
+        </label>
+
+        <div class="toolbar-buttons">
+          <button id="bulkToggleBtn" class="btn" type="button" aria-pressed="false">Bulk</button>
+          <button id="exportBtn" class="btn" type="button">Export</button>
+          <button id="importBtn" class="btn" type="button">Import</button>
+          <button id="resetBoardBtn" class="btn btn-danger" type="button">Reset</button>
+          <button id="boardSettingsBtn" class="btn" type="button">Settings</button>
+          <button id="insightsBtn" class="btn" type="button">Insights</button>
+        </div>
+
+        <button id="themeToggle" class="btn btn-icon" type="button" aria-label="Toggle theme">
+          <span class="icon" aria-hidden="true">◐</span>
+        </button>
+      </div>
+    </header>
+
+    <main class="app-main">
+      <div id="updateBanner" class="banner" hidden role="status" aria-live="polite">
+        <div class="banner-text">A new version is available.</div>
+        <button id="refreshBtn" class="btn btn-primary" type="button">Refresh</button>
+      </div>
+
+      <div id="columns" class="columns" aria-label="Kanban board"></div>
+    </main>
+
+    <div id="bulkBar" class="bulk-bar" hidden role="region" aria-label="Bulk actions">
+      <div class="bulk-left">
+        <span id="bulkCount" class="bulk-count">0 selected</span>
+      </div>
+      <div class="bulk-right">
+        <label class="field compact">
+          <span class="field-label">Move to</span>
+          <select id="bulkMoveStatus" class="select" aria-label="Move selected to status"></select>
+        </label>
+        <button id="bulkMoveBtn" class="btn" type="button">Move</button>
+        <button id="bulkDeleteBtn" class="btn btn-danger" type="button">Delete</button>
+        <button id="bulkClearBtn" class="btn" type="button">Clear</button>
+      </div>
+    </div>
+
+    <input id="importFileInput" type="file" accept="application/json,.json" hidden />
+
+    <div id="toastRoot" class="toast-root" aria-live="polite" aria-atomic="true"></div>
+
+    <div id="modalBackdrop" class="modal-backdrop" hidden></div>
+    <div
+      id="taskModal"
+      class="modal"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="taskModalTitle"
+      hidden
+    >
+      <form id="taskForm" class="modal-card">
+        <div class="modal-header">
+          <div>
+            <div id="taskModalTitle" class="modal-title">Task</div>
+            <div class="modal-meta">
+              <span id="taskDates" class="muted"></span>
+            </div>
+          </div>
+          <button id="closeModalBtn" class="btn btn-icon" type="button" aria-label="Close">
+            <span aria-hidden="true">✕</span>
+          </button>
+        </div>
+
+        <input id="taskId" type="hidden" />
+
+        <label class="field">
+          <span class="field-label">Title</span>
+          <input id="taskTitle" class="input" type="text" required maxlength="120" />
+        </label>
+
+        <label class="field">
+          <span class="field-label">Description</span>
+          <textarea id="taskDescription" class="textarea" rows="5"></textarea>
+          <div class="inline">
+            <button id="togglePreviewBtn" class="btn" type="button">Preview</button>
+            <span class="muted" style="font-size:12px;">Markdown supported</span>
+          </div>
+          <div id="mdPreview" class="md-preview" hidden></div>
+        </label>
+
+        <div class="grid-2">
+          <label class="field">
+            <span class="field-label">Status</span>
+            <select id="taskStatus" class="select"></select>
+          </label>
+
+          <label class="field">
+            <span class="field-label">Priority</span>
+            <select id="taskPriority" class="select">
+              <option value="">None</option>
+              <option value="low">Low</option>
+              <option value="medium">Medium</option>
+              <option value="high">High</option>
+            </select>
+          </label>
+        </div>
+
+        <div class="grid-2">
+          <label class="field">
+            <span class="field-label">Assignee</span>
+            <input id="taskAssignee" class="input" type="text" placeholder="Name…" maxlength="80" />
+          </label>
+          <label class="field">
+            <span class="field-label">Due date</span>
+            <input id="taskDueDate" class="input" type="date" />
+          </label>
+        </div>
+
+        <div class="grid-2">
+          <label class="field">
+            <span class="field-label">Labels (comma separated)</span>
+            <input id="taskLabels" class="input" type="text" placeholder="frontend, bug, urgent" />
+          </label>
+          <label class="field checkbox-field">
+            <span class="field-label">Blocked</span>
+            <div class="inline">
+              <input id="taskBlocked" type="checkbox" />
+              <span class="muted" style="font-size:12px;">Show as blocked</span>
+            </div>
+          </label>
+        </div>
+
+        <label class="field">
+          <span class="field-label">Color (optional)</span>
+          <input id="taskColor" class="input" type="color" value="#4f46e5" />
+        </label>
+
+        <div class="section">
+          <div class="section-title">Checklist</div>
+          <div id="checklistList" class="list"></div>
+          <div class="inline">
+            <input id="checklistNew" class="input" type="text" placeholder="New checklist item…" maxlength="140" />
+            <button id="checklistAddBtn" class="btn" type="button">Add</button>
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section-title">Attachments</div>
+          <div id="attachmentsList" class="list"></div>
+          <div class="inline">
+            <input id="attachmentNew" class="input" type="url" placeholder="https://…" />
+            <button id="attachmentAddBtn" class="btn" type="button">Add</button>
+          </div>
+        </div>
+
+        <div class="modal-actions">
+          <button id="deleteTaskBtn" class="btn btn-danger" type="button">Delete</button>
+          <button id="duplicateTaskBtn" class="btn" type="button">Duplicate</button>
+          <button id="moveLeftBtn" class="btn" type="button" aria-label="Move to previous column">&lt;</button>
+          <button id="moveRightBtn" class="btn" type="button" aria-label="Move to next column">&gt;</button>
+          <div class="spacer"></div>
+          <button id="saveTaskBtn" class="btn btn-primary" type="submit">Save</button>
+        </div>
+      </form>
+    </div>
+
+    <div id="settingsModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="settingsModalTitle" hidden>
+      <form id="settingsForm" class="modal-card">
+        <div class="modal-header">
+          <div>
+            <div id="settingsModalTitle" class="modal-title">Board settings</div>
+            <div class="modal-meta"><span class="muted">WIP limits, policies, grouping</span></div>
+          </div>
+          <button id="closeSettingsBtn" class="btn btn-icon" type="button" aria-label="Close settings">
+            <span aria-hidden="true">✕</span>
+          </button>
+        </div>
+
+        <label class="field">
+          <span class="field-label">Group tasks by</span>
+          <select id="settingsGroupBy" class="select">
+            <option value="none">None</option>
+            <option value="priority">Priority</option>
+            <option value="label">Label</option>
+          </select>
+        </label>
+
+        <div id="wipGrid" class="wip-grid"></div>
+
+        <div id="policyGrid" class="policy-grid"></div>
+
+        <div class="modal-actions">
+          <div class="spacer"></div>
+          <button id="saveSettingsBtn" class="btn btn-primary" type="submit">Save settings</button>
+        </div>
+      </form>
+    </div>
+
+    <div id="insightsModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="insightsModalTitle" hidden>
+      <div class="modal-card">
+        <div class="modal-header">
+          <div>
+            <div id="insightsModalTitle" class="modal-title">Insights</div>
+            <div class="modal-meta"><span class="muted">Analytics + activity log</span></div>
+          </div>
+          <button id="closeInsightsBtn" class="btn btn-icon" type="button" aria-label="Close insights">
+            <span aria-hidden="true">✕</span>
+          </button>
+        </div>
+
+        <div id="insightsStats" class="insights"></div>
+        <div class="section">
+          <div class="section-title">Activity log</div>
+          <div id="activityLog" class="activity"></div>
+        </div>
+      </div>
+    </div>
+
+    <noscript>
+      <div class="noscript">This app requires JavaScript.</div>
+    </noscript>
+
+    <script type="module" src="script.js?v=2026-01-09-1"></script>
+  </body>
+</html>
