@@ -1,4 +1,4 @@
-import { getBoards, getSetting, makeId, saveBoard, setSetting, deleteBoard } from "./db.js?v=2026-01-09-1";
+import { getBoards, getSetting, makeId, saveBoard, setSetting, deleteBoard } from "./db.js?v=2026-01-09-2";
 
 export const COLUMN_IDS = ["todo", "inprogress", "review", "test", "done"];
 
@@ -25,6 +25,7 @@ export function makeBoard(name) {
     wipLimits: Object.fromEntries(COLUMN_IDS.map((c) => [c, null])),
     columnPolicies: Object.fromEntries(COLUMN_IDS.map((c) => [c, ""])),
     groupBy: "none",
+    viewMode: "kanban",
     createdAt: timestamp,
     updatedAt: timestamp,
   };
@@ -66,7 +67,7 @@ export async function renameBoard(boardId, name) {
   return board;
 }
 
-export async function updateBoardSettings(boardId, { wipLimits, columnPolicies, groupBy }) {
+export async function updateBoardSettings(boardId, { wipLimits, columnPolicies, groupBy, viewMode }) {
   const boards = await getBoards();
   const board = boards.find((b) => b.id === boardId);
   if (!board) throw new Error("Board not found");
@@ -74,6 +75,7 @@ export async function updateBoardSettings(boardId, { wipLimits, columnPolicies, 
   if (wipLimits && typeof wipLimits === "object") board.wipLimits = wipLimits;
   if (columnPolicies && typeof columnPolicies === "object") board.columnPolicies = columnPolicies;
   if (groupBy) board.groupBy = groupBy;
+  if (viewMode === "kanban" || viewMode === "scrum") board.viewMode = viewMode;
 
   board.updatedAt = nowISO();
   await saveBoard(board);

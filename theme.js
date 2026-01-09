@@ -1,4 +1,4 @@
-import { getSetting, setSetting } from "./db.js?v=2026-01-09-1";
+import { getSetting, setSetting } from "./db.js?v=2026-01-09-2";
 
 const THEME_KEY = "theme";
 

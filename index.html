@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Kanban</title>
     <meta name="color-scheme" content="light dark" />
-    <link rel="stylesheet" href="style.css?v=2026-01-09-1" />
+    <link rel="stylesheet" href="style.css?v=2026-01-09-2" />
   </head>
   <body>
     <header class="app-header">
@@ -15,6 +15,14 @@
       </div>
 
       <div class="toolbar" role="toolbar" aria-label="Kanban controls">
+        <label class="field">
+          <span class="field-label">View</span>
+          <select id="viewMode" class="select" aria-label="Select view mode">
+            <option value="kanban">Kanban</option>
+            <option value="scrum">Scrum</option>
+          </select>
+        </label>
+
         <label class="field">
           <span class="field-label">Board</span>
           <select id="boardSelect" class="select" aria-label="Select board"></select>
@@ -61,6 +69,7 @@
 
         <div class="toolbar-buttons">
           <button id="bulkToggleBtn" class="btn" type="button" aria-pressed="false">Bulk</button>
+          <button id="epicsBtn" class="btn" type="button">Epics</button>
           <button id="exportBtn" class="btn" type="button">Export</button>
           <button id="importBtn" class="btn" type="button">Import</button>
           <button id="resetBoardBtn" class="btn btn-danger" type="button">Reset</button>
@@ -80,7 +89,7 @@
         <button id="refreshBtn" class="btn btn-primary" type="button">Refresh</button>
       </div>
 
-      <div id="columns" class="columns" aria-label="Kanban board"></div>
+      <div id="columns" class="columns" aria-label="Board"></div>
     </main>
 
     <div id="bulkBar" class="bulk-bar" hidden role="region" aria-label="Bulk actions">
@@ -160,7 +169,7 @@
 
         <div class="grid-2">
           <label class="field">
-            <span class="field-label">Assignee</span>
+            <span class="field-label">Assigned to</span>
             <input id="taskAssignee" class="input" type="text" placeholder="Name…" maxlength="80" />
           </label>
           <label class="field">
@@ -171,8 +180,25 @@
 
         <div class="grid-2">
           <label class="field">
+            <span class="field-label">Epic</span>
+            <div class="inline">
+              <select id="taskEpic" class="select" aria-label="Select epic"></select>
+              <button id="newEpicBtn" class="btn" type="button">New</button>
+            </div>
+          </label>
+          <label class="field">
             <span class="field-label">Labels (comma separated)</span>
             <input id="taskLabels" class="input" type="text" placeholder="frontend, bug, urgent" />
+          </label>
+        </div>
+
+        <div class="grid-2">
+          <label class="field checkbox-field">
+            <span class="field-label">Sprint</span>
+            <div class="inline">
+              <input id="taskInSprint" type="checkbox" />
+              <span class="muted" style="font-size:12px;">Include in sprint (Scrum view)</span>
+            </div>
           </label>
           <label class="field checkbox-field">
             <span class="field-label">Blocked</span>
@@ -269,10 +295,31 @@
       </div>
     </div>
 
+    <div id="epicsModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="epicsModalTitle" hidden>
+      <div class="modal-card">
+        <div class="modal-header">
+          <div>
+            <div id="epicsModalTitle" class="modal-title">Epics</div>
+            <div class="modal-meta"><span class="muted">Create and manage epics for this board</span></div>
+          </div>
+          <button id="closeEpicsBtn" class="btn btn-icon" type="button" aria-label="Close epics">
+            <span aria-hidden="true">✕</span>
+          </button>
+        </div>
+
+        <div class="inline">
+          <input id="epicNewName" class="input" type="text" placeholder="New epic name…" maxlength="80" />
+          <button id="epicCreateBtn" class="btn btn-primary" type="button">Create</button>
+        </div>
+
+        <div id="epicsList" class="list"></div>
+      </div>
+    </div>
+
     <noscript>
       <div class="noscript">This app requires JavaScript.</div>
     </noscript>
 
-    <script type="module" src="script.js?v=2026-01-09-1"></script>
+    <script type="module" src="script.js?v=2026-01-09-2"></script>
   </body>
 </html>

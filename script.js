@@ -3,13 +3,16 @@ import {
   deleteTask,
   deleteTasksByBoardId,
   getBoards,
+  getEpics,
   getEvents,
   getTasks,
   initDB,
   makeId,
+  saveEpic,
   saveTask,
   saveTasks,
-} from "./db.js?v=2026-01-09-1";
+  deleteEpic,
+} from "./db.js?v=2026-01-09-2";
 import {
   COLUMN_IDS,
   COLUMN_LABELS,
@@ -20,15 +23,18 @@ import {
   renameBoard,
   setActiveBoardId,
   updateBoardSettings,
-} from "./boards.js?v=2026-01-09-1";
-import { initTheme, toggleTheme } from "./theme.js?v=2026-01-09-1";
+} from "./boards.js?v=2026-01-09-2";
+import { initTheme, toggleTheme } from "./theme.js?v=2026-01-09-2";
 
 const state = {
   boards: [],
   activeBoardId: null,
   activeBoard: null,
+  viewMode: "kanban",
   tasks: [],
   tasksById: new Map(),
+  epics: [],
+  epicsById: new Map(),
   draggingEl: null,
   filter: { search: "", priority: "", groupBy: "none" },
   bulk: { enabled: false, selected: new Set() },
@@ -42,7 +48,7 @@ function nowISO() {
   return new Date().toISOString();
 }
 
-const APP_VERSION = "2026-01-09-1";
+const APP_VERSION = "2026-01-09-2";
 
 function parseLabels(input) {
   if (!input) return [];
@@ -63,6 +69,7 @@ function ensureBoardDefaults(board) {
     if (!(c in b.columnPolicies)) b.columnPolicies[c] = "";
   }
   b.groupBy = b.groupBy || "none";
+  b.viewMode = b.viewMode === "scrum" ? "scrum" : "kanban";
   return b;
 }
 
@@ -76,7 +83,12 @@ function wipLimitFor(status) {
 function canPlaceInStatus(status, { excludingTaskId = null } = {}) {
   const limit = wipLimitFor(status);
   if (!limit) return true;
-  const count = state.tasks.filter((t) => t.status === status && t.id !== excludingTaskId).length;
+  const count = state.tasks.filter((t) => {
+    if (t.status !== status) return false;
+    if (t.id === excludingTaskId) return false;
+    if (state.viewMode === "scrum" && !t.inSprint) return false;
+    return true;
+  }).length;
   return count < limit;
 }
 
@@ -127,6 +139,13 @@ function showToast(message, { kind = "info", actions = [], timeoutMs = 4500 } = 
   text.textContent = message;
   text.style.fontWeight = kind === "error" ? "800" : "700";
   row.appendChild(text);
+  const closeBtn = document.createElement("button");
+  closeBtn.type = "button";
+  closeBtn.className = "btn btn-icon";
+  closeBtn.setAttribute("aria-label", "Dismiss");
+  closeBtn.textContent = "x";
+  closeBtn.addEventListener("click", () => toast.remove());
+  row.appendChild(closeBtn);
   toast.appendChild(row);
 
   if (actions.length) {
@@ -150,8 +169,7 @@ function showToast(message, { kind = "info", actions = [], timeoutMs = 4500 } = 
   }
 
   root.appendChild(toast);
-  const timer = setTimeout(() => toast.remove(), timeoutMs);
-  toast.addEventListener("mouseenter", () => clearTimeout(timer), { once: true });
+  setTimeout(() => toast.remove(), Math.max(800, timeoutMs));
 }
 
 function shortDate(iso) {
@@ -242,6 +260,10 @@ function normalizeTask(task) {
   normalized.priority = normalized.priority || "";
   normalized.color = normalized.color || "#4f46e5";
   normalized.assignee = normalized.assignee || "";
+  normalized.epicId = normalized.epicId || "";
+  normalized.inSprint = Object.prototype.hasOwnProperty.call(normalized, "inSprint")
+    ? Boolean(normalized.inSprint)
+    : true;
   normalized.dueDate = normalized.dueDate || "";
   normalized.labels = Array.isArray(normalized.labels) ? normalized.labels : parseLabels(normalized.labels);
   normalized.blocked = Boolean(normalized.blocked);
@@ -258,11 +280,19 @@ async function loadBoardsAndActive() {
   if (state.activeBoardId) await setActiveBoardId(state.activeBoardId);
   state.activeBoard = state.boards.find((b) => b.id === state.activeBoardId) || null;
   if (state.activeBoard) state.filter.groupBy = state.activeBoard.groupBy || "none";
+  state.viewMode = state.activeBoard?.viewMode || "kanban";
 }
 
 async function loadTasks() {
   state.tasks = (await getTasks(state.activeBoardId)).map(normalizeTask).sort(byOrderThenDate);
   state.tasksById = new Map(state.tasks.map((t) => [t.id, t]));
+}
+
+async function loadEpics() {
+  state.epics = (await getEpics(state.activeBoardId)).sort((a, b) =>
+    String(a.name || "").localeCompare(String(b.name || "")),
+  );
+  state.epicsById = new Map(state.epics.map((e) => [e.id, e]));
 }
 
 function renderBoardSelect() {
@@ -280,15 +310,38 @@ function renderBoardSelect() {
 function renderColumns() {
   const columnsRoot = el("columns");
   const tasks = filteredTasks();
-  const counts = taskCounts(tasks);
+  const isScrum = state.viewMode === "scrum";
+  columnsRoot.classList.toggle("is-scrum", isScrum);
+  const sprintTasks = isScrum ? tasks.filter((t) => t.inSprint) : tasks;
+  const backlogTasks = isScrum ? tasks.filter((t) => !t.inSprint) : [];
+  const counts = taskCounts(sprintTasks);
 
-  columnsRoot.innerHTML = COLUMN_IDS.map((status) => {
+  const backlogColumn = isScrum
+    ? `
+      <section class="column" data-status="backlog" aria-label="Backlog column">
+        <div class="column-header">
+          <div style="display:flex; gap:10px; align-items:center; min-width:0;">
+            <div class="column-title">Backlog</div>
+            <div class="count-pill" aria-label="Task count">${backlogTasks.length}</div>
+          </div>
+          <div style="display:flex; gap:8px; align-items:center;">
+            <button class="btn btn-icon add-task-btn" type="button" data-status="todo" data-sprint="0" aria-label="Add backlog task">
+              <span aria-hidden="true">+</span>
+            </button>
+          </div>
+        </div>
+        <div class="task-list" role="list" data-status="backlog"></div>
+      </section>
+    `
+    : "";
+
+  const sprintColumns = COLUMN_IDS.map((status) => {
     const label = COLUMN_LABELS[status] || status;
     const limit = wipLimitFor(status);
     const limitLabel = limit ? ` / ${limit}` : "";
     const policy = (state.activeBoard?.columnPolicies?.[status] || "").trim();
     const addButton =
-      status === "todo"
+      !isScrum && status === "todo"
         ? `
           <button class="btn btn-icon add-task-btn" type="button" data-status="${escapeText(
             status,
@@ -321,12 +374,15 @@ function renderColumns() {
     `;
   }).join("");
 
+  columnsRoot.innerHTML = `${backlogColumn}${sprintColumns}`;
+
   for (const status of COLUMN_IDS) {
     const list = columnsRoot.querySelector(`.task-list[data-status="${CSS.escape(status)}"]`);
     if (!list) continue;
     list.addEventListener("dragover", onDragOver);
     list.addEventListener("drop", onDrop);
     list.addEventListener("dragenter", (e) => {
+      if (state.viewMode !== "kanban") return;
       if (state.filter.groupBy !== "none") return;
       e.preventDefault();
       list.style.outline = `2px dashed color-mix(in srgb, var(--accent) 55%, transparent)`;
@@ -351,13 +407,22 @@ function renderColumns() {
 
 function renderTasks() {
   const root = el("columns");
+  const isScrum = state.viewMode === "scrum";
   const tasks = filteredTasks();
+  const sprintTasks = isScrum ? tasks.filter((t) => t.inSprint) : tasks;
+  const backlogTasks = isScrum ? tasks.filter((t) => !t.inSprint) : [];
+  const groupBy = isScrum ? "none" : state.filter.groupBy;
+
+  if (isScrum) {
+    const backlogList = root.querySelector(`.task-list[data-status="backlog"]`);
+    if (backlogList) backlogList.innerHTML = backlogTasks.sort(byOrderThenDate).map(renderTaskCard).join("");
+  }
   for (const status of COLUMN_IDS) {
     const list = root.querySelector(`.task-list[data-status="${CSS.escape(status)}"]`);
     if (!list) continue;
-    const columnTasks = tasks.filter((t) => t.status === status).sort(byOrderThenDate);
+    const columnTasks = sprintTasks.filter((t) => t.status === status).sort(byOrderThenDate);
 
-    if (state.filter.groupBy === "none") {
+    if (groupBy === "none") {
       list.innerHTML = columnTasks.map(renderTaskCard).join("");
       continue;
     }
@@ -432,6 +497,10 @@ function renderTaskCard(task) {
     badges.push(`<span class="badge ${escapeText(priority)}">${escapeText(priority)}</span>`);
   }
   if (task.blocked) badges.push(`<span class="badge high">blocked</span>`);
+  if (task.assignee) badges.push(`<span class="badge">Assigned: ${escapeText(task.assignee)}</span>`);
+  if (task.epicId && state.epicsById.has(task.epicId)) {
+    badges.push(`<span class="badge">Epic: ${escapeText(state.epicsById.get(task.epicId).name || "Epic")}</span>`);
+  }
   if (due) badges.push(`<span class="badge">${escapeText(due)}</span>`);
   for (const l of labels) badges.push(`<span class="badge">${escapeText(l)}</span>`);
 
@@ -529,9 +598,12 @@ async function moveTask(taskId, toStatus, { source = "move" } = {}) {
 
   const before = { ...task };
   const ts = nowISO();
+  const nextInSprint =
+    state.viewMode === "scrum" && !task.inSprint && toStatus !== "todo" ? true : task.inSprint;
   const updated = normalizeTask({
     ...task,
     status: toStatus,
+    inSprint: nextInSprint,
     updatedAt: ts,
     order: nextOrderForStatus(toStatus),
     doneAt: toStatus === "done" ? (task.doneAt || ts) : task.doneAt || "",
@@ -643,6 +715,7 @@ function getDragAfterElement(container, y) {
 }
 
 function onDragStart(e) {
+  if (state.viewMode !== "kanban") return;
   const card = e.currentTarget;
   state.draggingEl = card;
   card.classList.add("is-dragging");
@@ -660,6 +733,7 @@ function onDragEnd() {
 }
 
 function onDragOver(e) {
+  if (state.viewMode !== "kanban") return;
   if (state.filter.groupBy !== "none" || state.bulk.enabled) return;
   e.preventDefault();
   if (!state.draggingEl) return;
@@ -670,6 +744,7 @@ function onDragOver(e) {
 }
 
 async function onDrop(e) {
+  if (state.viewMode !== "kanban") return;
   if (state.filter.groupBy !== "none" || state.bulk.enabled) return;
   e.preventDefault();
   if (!state.draggingEl) return;
@@ -782,7 +857,10 @@ function closeOverlayModal(modalId, { force = false, confirmDirty = false } = {}
   state.modal.focusTrapCleanup = null;
 
   const anyOpen =
-    !el("taskModal").hidden || !el("settingsModal").hidden || !el("insightsModal").hidden;
+    !el("taskModal").hidden ||
+    !el("settingsModal").hidden ||
+    !el("insightsModal").hidden ||
+    !el("epicsModal").hidden;
   if (!anyOpen) {
     el("modalBackdrop").hidden = true;
     document.body.style.overflow = "";
@@ -794,6 +872,8 @@ function closeOverlayModal(modalId, { force = false, confirmDirty = false } = {}
         ? "settingsModal"
         : !el("insightsModal").hidden
           ? "insightsModal"
+          : !el("epicsModal").hidden
+            ? "epicsModal"
           : null;
   }
   return true;
@@ -819,6 +899,15 @@ function fillStatusOptions(selectEl) {
   selectEl.innerHTML = COLUMN_IDS.map(
     (s) => `<option value="${escapeText(s)}">${escapeText(COLUMN_LABELS[s] || s)}</option>`,
   ).join("");
+}
+
+function fillEpicOptions(selectEl, selectedId) {
+  if (!selectEl) return;
+  const opts = [`<option value="">None</option>`].concat(
+    state.epics.map((e) => `<option value="${escapeText(e.id)}">${escapeText(e.name || "Epic")}</option>`),
+  );
+  selectEl.innerHTML = opts.join("");
+  if (selectedId) selectEl.value = selectedId;
 }
 
 function normalizeUrl(url) {
@@ -964,8 +1053,11 @@ function openTaskModal({ mode, task, initialStatus }) {
   const labels = document.getElementById("taskLabels");
   const blocked = document.getElementById("taskBlocked");
   const duplicateBtn = document.getElementById("duplicateTaskBtn");
+  const epicSelect = document.getElementById("taskEpic");
+  const inSprint = document.getElementById("taskInSprint");
 
   fillStatusOptions(statusSelect);
+  fillEpicOptions(epicSelect, task?.epicId || "");
 
   if (mode === "edit" && task) {
     el("taskModalTitle").textContent = "Edit task";
@@ -979,6 +1071,8 @@ function openTaskModal({ mode, task, initialStatus }) {
     if (due) due.value = task.dueDate ? String(task.dueDate).slice(0, 10) : "";
     if (labels) labels.value = (task.labels || []).join(", ");
     if (blocked) blocked.checked = Boolean(task.blocked);
+    if (inSprint) inSprint.checked = Boolean(task.inSprint);
+    if (epicSelect) epicSelect.value = task.epicId || "";
     renderChecklist(task.checklist || []);
     renderAttachments(task.attachments || []);
     deleteBtn.hidden = false;
@@ -996,6 +1090,8 @@ function openTaskModal({ mode, task, initialStatus }) {
     if (due) due.value = "";
     if (labels) labels.value = "";
     if (blocked) blocked.checked = false;
+    if (inSprint) inSprint.checked = state.viewMode !== "scrum";
+    if (epicSelect) epicSelect.value = "";
     renderChecklist([]);
     renderAttachments([]);
     deleteBtn.hidden = true;
@@ -1025,13 +1121,15 @@ async function onSaveTask(e) {
   const id = el("taskId").value.trim();
   const title = el("taskTitle").value.trim();
   const description = el("taskDescription").value || "";
-  const status = el("taskStatus").value;
+  let status = el("taskStatus").value;
   const priority = el("taskPriority").value || "";
   const color = el("taskColor").value || "";
   const assignee = (document.getElementById("taskAssignee")?.value || "").trim();
   const dueRaw = document.getElementById("taskDueDate")?.value || "";
   const dueDate = dueRaw ? `${dueRaw}T00:00:00.000Z` : "";
   const labels = parseLabels(document.getElementById("taskLabels")?.value || "");
+  const epicId = document.getElementById("taskEpic")?.value || "";
+  const inSprint = Boolean(document.getElementById("taskInSprint")?.checked);
   const blocked = Boolean(document.getElementById("taskBlocked")?.checked);
   const checklist = readChecklistFromUI();
   const attachments = readAttachmentsFromUI();
@@ -1045,7 +1143,10 @@ async function onSaveTask(e) {
   const timestamp = nowISO();
   const isNew = !existing;
 
-  const statusChanged = existing && existing.status !== status;
+  let statusChanged = existing && existing.status !== status;
+
+  if (state.viewMode === "scrum" && !inSprint) status = "todo";
+  statusChanged = existing && existing.status !== status;
 
   if (!canPlaceInStatus(status, { excludingTaskId: existing?.id || null })) {
     showToast(`WIP limit reached for ${COLUMN_LABELS[status]}.`, { kind: "error" });
@@ -1063,6 +1164,8 @@ async function onSaveTask(e) {
     priority,
     color,
     assignee,
+    epicId,
+    inSprint,
     dueDate,
     labels,
     blocked,
@@ -1172,9 +1275,13 @@ async function onMoveLeftRight(dir) {
 async function reloadAndRerender() {
   await loadBoardsAndActive();
   await loadTasks();
+  await loadEpics();
   renderBoardSelect();
   const groupBy = document.getElementById("groupBy");
   if (groupBy) groupBy.value = state.filter.groupBy;
+  const viewMode = document.getElementById("viewMode");
+  if (viewMode) viewMode.value = state.viewMode;
+  syncViewModeUi();
   renderBulkBar();
   renderColumns();
 }
@@ -1395,6 +1502,27 @@ async function onGroupByChange(value) {
   renderColumns();
 }
 
+function syncViewModeUi() {
+  const groupBy = document.getElementById("groupBy");
+  if (groupBy) groupBy.disabled = state.viewMode === "scrum";
+}
+
+async function onViewModeChange(value) {
+  const vm = value === "scrum" ? "scrum" : "kanban";
+  state.viewMode = vm;
+  try {
+    await updateBoardSettings(state.activeBoardId, { viewMode: vm });
+    await logEvent("board_settings", { viewMode: vm });
+    await loadBoardsAndActive();
+  } catch {
+    // ignore
+  }
+  const viewMode = document.getElementById("viewMode");
+  if (viewMode) viewMode.value = state.viewMode;
+  syncViewModeUi();
+  renderColumns();
+}
+
 function percentile(sorted, p) {
   if (!sorted.length) return 0;
   const idx = Math.min(sorted.length - 1, Math.max(0, Math.floor((p / 100) * (sorted.length - 1))));
@@ -1495,6 +1623,90 @@ async function openInsightsModal() {
   }
 
   openOverlayModal("insightsModal");
+}
+
+function renderEpicsList() {
+  const root = document.getElementById("epicsList");
+  if (!root) return;
+  const counts = new Map();
+  for (const t of state.tasks) {
+    if (!t.epicId) continue;
+    counts.set(t.epicId, (counts.get(t.epicId) || 0) + 1);
+  }
+
+  root.innerHTML = state.epics
+    .map((e) => {
+      const c = counts.get(e.id) || 0;
+      return `
+        <div class="list-item" data-epic-id="${escapeText(e.id)}">
+          <div class="list-item-left">
+            <div class="list-item-text">${escapeText(e.name || "Epic")}</div>
+            <span class="badge">${c} tasks</span>
+          </div>
+          <div class="inline">
+            <button class="btn" type="button" data-rename="1">Rename</button>
+            <button class="btn btn-danger" type="button" data-delete="1">Delete</button>
+          </div>
+        </div>
+      `;
+    })
+    .join("");
+
+  root.querySelectorAll("[data-rename]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const row = btn.closest("[data-epic-id]");
+      const id = row?.dataset.epicId;
+      const epic = state.epicsById.get(id);
+      if (!epic) return;
+      const name = prompt("Epic name:", epic.name || "Epic");
+      if (!name) return;
+      const updated = { ...epic, name: name.trim() || epic.name, updatedAt: nowISO() };
+      await saveEpic(updated);
+      await loadEpics();
+      renderEpicsList();
+      showToast("Epic saved.", { timeoutMs: 2200 });
+    });
+  });
+
+  root.querySelectorAll("[data-delete]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const row = btn.closest("[data-epic-id]");
+      const id = row?.dataset.epicId;
+      const epic = state.epicsById.get(id);
+      if (!epic) return;
+      if (!confirm(`Delete epic "${epic.name}"? Tasks will be unlinked.`)) return;
+
+      const affected = state.tasks.filter((t) => t.epicId === id).map((t) => ({ ...t, epicId: "", updatedAt: nowISO() }));
+      try {
+        if (affected.length) await saveTasks(affected);
+        await deleteEpic(id);
+        await logEvent("epic_deleted", { epicId: id, affected: affected.length });
+        await loadTasks();
+        await loadEpics();
+        renderEpicsList();
+        showToast("Epic deleted.", { timeoutMs: 2200 });
+        renderColumns();
+      } catch (err) {
+        showToast(err?.message || "Epic delete failed.", { kind: "error" });
+      }
+    });
+  });
+}
+
+async function openEpicsModal() {
+  await loadEpics();
+  renderEpicsList();
+  openOverlayModal("epicsModal");
+}
+
+async function createEpicFromName(name) {
+  const trimmed = String(name || "").trim();
+  if (!trimmed) return null;
+  const epic = { id: makeId(), boardId: state.activeBoardId, name: trimmed, createdAt: nowISO(), updatedAt: nowISO() };
+  await saveEpic(epic);
+  await logEvent("epic_created", { epicId: epic.id });
+  await loadEpics();
+  return epic;
 }
 
 async function onBulkMove() {
@@ -1604,6 +1816,8 @@ function wireEvents() {
     await toggleTheme();
   });
 
+  document.getElementById("viewMode")?.addEventListener("change", (e) => onViewModeChange(e.target.value));
+
   document.getElementById("quickAddBtn")?.addEventListener("click", onQuickAdd);
   document.getElementById("quickAddTitle")?.addEventListener("keydown", (e) => {
     if (e.key === "Enter") {
@@ -1646,10 +1860,22 @@ function wireEvents() {
   document.getElementById("resetBoardBtn")?.addEventListener("click", onResetBoard);
   document.getElementById("boardSettingsBtn")?.addEventListener("click", openSettingsModal);
   document.getElementById("insightsBtn")?.addEventListener("click", openInsightsModal);
+  document.getElementById("epicsBtn")?.addEventListener("click", openEpicsModal);
 
   document.getElementById("closeSettingsBtn")?.addEventListener("click", () => closeOverlayModal("settingsModal", { force: true }));
   document.getElementById("settingsForm")?.addEventListener("submit", onSaveSettings);
   document.getElementById("closeInsightsBtn")?.addEventListener("click", () => closeOverlayModal("insightsModal", { force: true }));
+  document.getElementById("closeEpicsBtn")?.addEventListener("click", () => closeOverlayModal("epicsModal", { force: true }));
+
+  document.getElementById("epicCreateBtn")?.addEventListener("click", async () => {
+    const input = document.getElementById("epicNewName");
+    if (!input) return;
+    const epic = await createEpicFromName(input.value);
+    if (!epic) return;
+    input.value = "";
+    renderEpicsList();
+    showToast("Epic created.", { timeoutMs: 2200 });
+  });
 
   document.getElementById("refreshBtn")?.addEventListener("click", () => {
     state.updateRequested = true;
@@ -1662,12 +1888,24 @@ function wireEvents() {
     if (!el("taskModal").hidden) closeModal();
     else if (!el("settingsModal").hidden) closeOverlayModal("settingsModal", { force: true });
     else if (!el("insightsModal").hidden) closeOverlayModal("insightsModal", { force: true });
+    else if (!el("epicsModal").hidden) closeOverlayModal("epicsModal", { force: true });
   });
   el("taskForm").addEventListener("submit", onSaveTask);
   el("deleteTaskBtn").addEventListener("click", onDeleteTask);
   document.getElementById("duplicateTaskBtn")?.addEventListener("click", onDuplicateTask);
   document.getElementById("moveLeftBtn")?.addEventListener("click", () => onMoveLeftRight("left"));
   document.getElementById("moveRightBtn")?.addEventListener("click", () => onMoveLeftRight("right"));
+  document.getElementById("newEpicBtn")?.addEventListener("click", async () => {
+    const name = prompt("New epic name:", "Epic");
+    if (!name) return;
+    const epic = await createEpicFromName(name);
+    if (!epic) return;
+    const select = document.getElementById("taskEpic");
+    fillEpicOptions(select, epic.id);
+    if (select) select.value = epic.id;
+    state.modal.dirty = true;
+    showToast("Epic created.", { timeoutMs: 2200 });
+  });
 
   document.getElementById("togglePreviewBtn")?.addEventListener("click", () => {
     state.modal.preview = !state.modal.preview;
@@ -1719,7 +1957,9 @@ function wireEvents() {
     "taskColor",
     "taskAssignee",
     "taskDueDate",
+    "taskEpic",
     "taskLabels",
+    "taskInSprint",
     "taskBlocked",
   ].forEach((id) => {
     const node = document.getElementById(id);
@@ -1733,6 +1973,7 @@ function wireEvents() {
     if (!el("taskModal").hidden) closeModal();
     else if (!el("settingsModal").hidden) closeOverlayModal("settingsModal", { force: true });
     else if (!el("insightsModal").hidden) closeOverlayModal("insightsModal", { force: true });
+    else if (!el("epicsModal").hidden) closeOverlayModal("epicsModal", { force: true });
   });
 
   el("columns").addEventListener("click", (e) => {
@@ -1789,10 +2030,14 @@ async function main() {
   await initTheme();
   await loadBoardsAndActive();
   await loadTasks();
+  await loadEpics();
   wireEvents();
   renderBoardSelect();
   const groupBy = document.getElementById("groupBy");
   if (groupBy) groupBy.value = state.filter.groupBy;
+  const viewMode = document.getElementById("viewMode");
+  if (viewMode) viewMode.value = state.viewMode;
+  syncViewModeUi();
   renderBulkBar();
   renderColumns();
   state.swRegistration = await registerServiceWorker();

@@ -1,17 +1,20 @@
 :root {
-  --bg: #f6f7fb;
+  --bg: #f4f5f7;
   --surface: #ffffff;
-  --surface-2: #f1f3f9;
-  --text: #111827;
-  --muted: #6b7280;
-  --border: #e5e7eb;
+  --surface-2: #ebecf0;
+  --text: #172b4d;
+  --muted: #6b778c;
+  --border: #dfe1e6;
   --shadow: 0 12px 28px rgba(17, 24, 39, 0.12);
-  --accent: #4f46e5;
-  --accent-2: #0ea5e9;
+  --accent: #0052cc;
+  --accent-2: #0065ff;
   --danger: #dc2626;
   --radius: 14px;
   --radius-sm: 10px;
   --transition: 180ms ease;
+  --header-bg: #0747a6;
+  --header-text: #ffffff;
+  --header-border: rgba(255, 255, 255, 0.22);
   --font: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial,
     "Apple Color Emoji", "Segoe UI Emoji";
 }
@@ -27,6 +30,9 @@ html[data-theme="dark"] {
   --accent: #818cf8;
   --accent-2: #38bdf8;
   --danger: #f87171;
+  --header-bg: #0f1b33;
+  --header-text: #e5e7eb;
+  --header-border: rgba(229, 231, 235, 0.14);
 }
 
 * {
@@ -48,9 +54,7 @@ body {
   display: flex;
   flex-direction: column;
   font-family: var(--font);
-  background: radial-gradient(1200px 800px at 18% 0%, rgba(79, 70, 229, 0.12), transparent),
-    radial-gradient(1200px 800px at 95% 10%, rgba(14, 165, 233, 0.12), transparent),
-    var(--bg);
+  background: var(--bg);
   color: var(--text);
   transition: background var(--transition), color var(--transition);
 }
@@ -64,9 +68,9 @@ body {
   align-items: center;
   justify-content: space-between;
   padding: 14px 16px;
-  background: color-mix(in srgb, var(--surface) 88%, transparent);
-  backdrop-filter: blur(10px);
-  border-bottom: 1px solid var(--border);
+  background: var(--header-bg);
+  color: var(--header-text);
+  border-bottom: 1px solid var(--header-border);
 }
 
 .brand-title {
@@ -78,6 +82,36 @@ body {
   font-size: 12px;
   color: var(--muted);
   margin-top: 2px;
+}
+
+.app-header .brand-subtitle {
+  color: color-mix(in srgb, var(--header-text) 75%, transparent);
+}
+
+.app-header .field-label {
+  color: color-mix(in srgb, var(--header-text) 78%, transparent);
+}
+
+.app-header .input,
+.app-header .select,
+.app-header .textarea,
+.app-header .btn {
+  background: color-mix(in srgb, #ffffff 16%, transparent);
+  border-color: color-mix(in srgb, #ffffff 26%, transparent);
+  color: var(--header-text);
+}
+
+.app-header .input::placeholder {
+  color: color-mix(in srgb, var(--header-text) 70%, transparent);
+}
+
+.app-header .btn:hover {
+  border-color: color-mix(in srgb, #ffffff 42%, transparent);
+}
+
+.app-header .btn-danger {
+  background: color-mix(in srgb, var(--danger) 26%, transparent);
+  border-color: color-mix(in srgb, #ffffff 26%, transparent);
 }
 
 .toolbar {
@@ -137,6 +171,10 @@ body {
   overflow: auto;
   padding-bottom: 8px;
   -webkit-overflow-scrolling: touch;
+}
+
+.columns.is-scrum {
+  grid-template-columns: repeat(6, minmax(260px, 1fr));
 }
 
 .column {
@@ -647,6 +685,10 @@ body {
   .columns {
     grid-template-columns: repeat(5, minmax(240px, 1fr));
   }
+
+  .columns.is-scrum {
+    grid-template-columns: repeat(6, minmax(240px, 1fr));
+  }
 }
 
 @media (max-width: 640px) {
@@ -666,6 +708,10 @@ body {
     grid-template-columns: repeat(5, minmax(84vw, 1fr));
     scroll-snap-type: x mandatory;
     scroll-padding: 12px;
+  }
+
+  .columns.is-scrum {
+    grid-template-columns: repeat(6, minmax(84vw, 1fr));
   }
 
   .column {

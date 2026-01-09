@@ -1,5 +1,5 @@
 const DB_NAME = "kanbanDB";
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 
 let dbPromise;
 
@@ -47,6 +47,11 @@ function openDB() {
         const events = db.createObjectStore("events", { keyPath: "id" });
         events.createIndex("boardId", "boardId", { unique: false });
         events.createIndex("boardId_ts", ["boardId", "ts"], { unique: false });
+      }
+
+      if (!db.objectStoreNames.contains("epics")) {
+        const epics = db.createObjectStore("epics", { keyPath: "id" });
+        epics.createIndex("boardId", "boardId", { unique: false });
       }
     };
 
@@ -108,11 +113,30 @@ async function deleteTasksByBoardIdInTx(tx, boardId) {
   });
 }
 
+async function deleteRowsByIndexInTx({ tx, storeName, indexName, value }) {
+  const store = tx.objectStore(storeName);
+  const index = store.index(indexName);
+  const range = IDBKeyRange.only(value);
+
+  return new Promise((resolve, reject) => {
+    const cursorRequest = index.openCursor(range);
+    cursorRequest.onerror = () => reject(cursorRequest.error);
+    cursorRequest.onsuccess = () => {
+      const cursor = cursorRequest.result;
+      if (!cursor) return resolve();
+      cursor.delete();
+      cursor.continue();
+    };
+  });
+}
+
 export async function deleteBoard(boardId) {
   const db = await openDB();
-  const tx = db.transaction(["boards", "tasks"], "readwrite");
+  const tx = db.transaction(["boards", "tasks", "events", "epics"], "readwrite");
   await requestToPromise(tx.objectStore("boards").delete(boardId));
   await deleteTasksByBoardIdInTx(tx, boardId);
+  await deleteRowsByIndexInTx({ tx, storeName: "events", indexName: "boardId", value: boardId });
+  await deleteRowsByIndexInTx({ tx, storeName: "epics", indexName: "boardId", value: boardId });
   await txToPromise(tx);
 }
 
@@ -198,4 +222,29 @@ export async function getEvents(boardId, { limit = 200 } = {}) {
   await txToPromise(tx);
   rows.sort((a, b) => String(b.ts).localeCompare(String(a.ts)));
   return rows.slice(0, Math.max(1, limit));
+}
+
+export async function getEpics(boardId) {
+  const db = await openDB();
+  const tx = db.transaction(["epics"], "readonly");
+  const store = tx.objectStore("epics");
+  const index = store.index("boardId");
+  const epics = await requestToPromise(index.getAll(IDBKeyRange.only(boardId)));
+  await txToPromise(tx);
+  return epics;
+}
+
+export async function saveEpic(epic) {
+  const db = await openDB();
+  const tx = db.transaction(["epics"], "readwrite");
+  await requestToPromise(tx.objectStore("epics").put(epic));
+  await txToPromise(tx);
+  return epic;
+}
+
+export async function deleteEpic(epicId) {
+  const db = await openDB();
+  const tx = db.transaction(["epics"], "readwrite");
+  await requestToPromise(tx.objectStore("epics").delete(epicId));
+  await txToPromise(tx);
 }
