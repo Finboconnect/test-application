@@ -17,7 +17,7 @@ import {
   deleteEpic,
   deleteSprint,
   upsertSprintSnapshot,
-} from "./db.js?v=2026-01-09-5";
+} from "./db.js?v=2026-01-09-9";
 import {
   COLUMN_IDS,
   COLUMN_LABELS,
@@ -28,8 +28,8 @@ import {
   renameBoard,
   setActiveBoardId,
   updateBoardSettings,
-} from "./boards.js?v=2026-01-09-5";
-import { initTheme, toggleTheme } from "./theme.js?v=2026-01-09-5";
+} from "./boards.js?v=2026-01-09-9";
+import { initTheme, toggleTheme } from "./theme.js?v=2026-01-09-9";
 
 const state = {
   boards: [],
@@ -44,10 +44,12 @@ const state = {
   sprintsById: new Map(),
   activeSprintId: null,
   draggingEl: null,
+  draggingFrom: null,
   filter: { search: "", priority: "", groupBy: "none" },
   bulk: { enabled: false, selected: new Set() },
   modal: { openId: null, dirty: false, preview: false, focusTrapCleanup: null },
   undo: null,
+  undoTimer: null,
   swRegistration: null,
   updateRequested: false,
 };
@@ -56,7 +58,7 @@ function nowISO() {
   return new Date().toISOString();
 }
 
-const APP_VERSION = "2026-01-09-5";
+const APP_VERSION = "2026-01-09-9";
 
 function parseLabels(input) {
   if (!input) return [];
@@ -184,6 +186,22 @@ function showToast(message, { kind = "info", actions = [], timeoutMs = 4500 } = 
   setTimeout(() => toast.remove(), Math.max(800, timeoutMs));
 }
 
+function setUndo(undo, { timeoutMs = 10000 } = {}) {
+  state.undo = undo || null;
+  const btn = document.getElementById("undoBtn");
+  if (btn) btn.hidden = !state.undo;
+  if (state.undoTimer) clearTimeout(state.undoTimer);
+  state.undoTimer = null;
+  if (state.undo) {
+    state.undoTimer = setTimeout(() => {
+      state.undo = null;
+      const b = document.getElementById("undoBtn");
+      if (b) b.hidden = true;
+      state.undoTimer = null;
+    }, Math.max(1200, timeoutMs));
+  }
+}
+
 function shortDate(iso) {
   if (!iso) return "";
   const d = new Date(iso);
@@ -207,6 +225,7 @@ function filteredTasks() {
   const q = state.filter.search.trim().toLowerCase();
   const pf = state.filter.priority;
   return state.tasks.filter((t) => {
+    if (state.viewMode === "kanban" && t.backlogOnly) return false;
     if (pf === "high" || pf === "medium" || pf === "low") {
       if (t.priority !== pf) return false;
     } else if (pf === "none") {
@@ -274,6 +293,7 @@ function normalizeTask(task) {
   normalized.assignee = normalized.assignee || "";
   normalized.epicId = normalized.epicId || "";
   normalized.sprintId = normalized.sprintId || "";
+  normalized.backlogOnly = Boolean(normalized.backlogOnly);
   normalized.dueDate = normalized.dueDate || "";
   normalized.labels = Array.isArray(normalized.labels) ? normalized.labels : parseLabels(normalized.labels);
   normalized.blocked = Boolean(normalized.blocked);
@@ -435,7 +455,8 @@ function renderColumns() {
     btn.addEventListener("click", () => {
       const status = btn.dataset.status;
       const policy = (state.activeBoard?.columnPolicies?.[status] || "").trim();
-      showToast(policy || "No policy set.", { timeoutMs: 7000 });
+      // Success toasts removed (avoid distractions)
+      if (policy) alert(policy);
     });
   });
 
@@ -479,13 +500,17 @@ function renderScrumControls() {
   renderSprintSelectOptions(select, selected);
 
   const meta = document.getElementById("activeSprintMeta");
-  if (meta) meta.textContent = active ? `${active.name} - ${formatSprintRange(active)}` : "No active sprint";
+  const selectedSprint = state.sprintsById.get(select?.value || "") || null;
+  if (meta) {
+    if (active) meta.textContent = `${active.name} - ${formatSprintRange(active)}`;
+    else if (selectedSprint) meta.textContent = `${selectedSprint.name} (${selectedSprint.status}) - ${formatSprintRange(selectedSprint)}`;
+    else meta.textContent = "No active sprint";
+  }
 
   const startBtn = document.getElementById("startSprintBtn");
   const completeBtn = document.getElementById("completeSprintBtn");
   const reportBtn = document.getElementById("sprintReportBtn");
 
-  const selectedSprint = state.sprintsById.get(select?.value || "") || null;
   if (startBtn) startBtn.disabled = Boolean(active) || !selectedSprint || selectedSprint.status !== "planned";
   if (completeBtn) completeBtn.disabled = !active;
   if (reportBtn) reportBtn.disabled = !selectedSprint;
@@ -536,9 +561,11 @@ function renderScrumSprintBoard() {
   const root = document.getElementById("sprintColumns");
   if (!root) return;
   const active = getActiveSprint();
+  const selectedId = document.getElementById("activeSprintSelect")?.value || "";
+  const viewing = active || state.sprintsById.get(selectedId) || null;
 
   const all = filteredTasks();
-  const sprintTasks = active ? all.filter((t) => t.sprintId === active.id) : [];
+  const sprintTasks = viewing ? all.filter((t) => t.sprintId === viewing.id) : [];
   const counts = taskCounts(sprintTasks);
 
   root.innerHTML = COLUMN_IDS.map((status) => {
@@ -546,10 +573,10 @@ function renderScrumSprintBoard() {
     const limit = wipLimitFor(status);
     const limitLabel = limit ? ` / ${limit}` : "";
     const addButton =
-      status === "todo" && active
+      status === "todo" && viewing && viewing.status === "active"
         ? `
           <button class="btn btn-icon add-task-btn" type="button" data-status="todo" data-sprint-id="${escapeText(
-            active.id,
+            viewing.id,
           )}" aria-label="Add issue to sprint">
             <span aria-hidden="true">+</span>
           </button>
@@ -597,6 +624,11 @@ function renderScrumSprintBoard() {
       const id = card.dataset.taskId;
       const task = state.tasksById.get(id);
       if (!task) return;
+    });
+    card.addEventListener("dblclick", () => {
+      const id = card.dataset.taskId;
+      const task = state.tasksById.get(id);
+      if (!task) return;
       openTaskModal({ mode: "edit", task });
     });
     card.addEventListener("keydown", (e) => onCardKeyDown(e, card));
@@ -619,13 +651,15 @@ function renderScrumSprintBoard() {
 
 function renderScrumBacklog() {
   const plannedRoot = document.getElementById("plannedSprints");
+  const completedRoot = document.getElementById("completedSprints");
   const backlogRoot = document.getElementById("backlogList");
-  if (!plannedRoot || !backlogRoot) return;
+  if (!plannedRoot || !backlogRoot || !completedRoot) return;
 
   const active = getActiveSprint();
   const all = filteredTasks();
-  const backlog = all.filter((t) => !t.sprintId).sort(byOrderThenDate);
+  const backlog = all.filter((t) => t.backlogOnly && !t.sprintId).sort(byOrderThenDate);
   const planned = state.sprints.filter((s) => s.status === "planned");
+  const completed = state.sprints.filter((s) => s.status === "completed").slice().reverse();
 
   plannedRoot.innerHTML = planned
     .map((s) => {
@@ -662,6 +696,46 @@ function renderScrumBacklog() {
     })
     .join("");
 
+  completedRoot.innerHTML =
+    completed.length === 0
+      ? ""
+      : `
+        <div class="planned-sprint">
+          <div class="planned-header">
+            <div style="display:flex; gap:10px; align-items:baseline; flex-wrap:wrap;">
+              <div class="planned-name">Completed sprints</div>
+              <div class="muted" style="font-size:12px;">Reference and reports</div>
+            </div>
+          </div>
+          <div class="planned-body">
+            ${completed
+              .map((s) => {
+                const count = all.filter((t) => t.sprintId === s.id).length;
+                return `
+                  <div class="list-item" style="align-items:center;">
+                    <div class="list-item-left" style="min-width:0;">
+                      <div class="list-item-text" style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${escapeText(
+                        s.name || "Sprint",
+                      )}</div>
+                      <div class="muted" style="font-size:12px;">${escapeText(formatSprintRange(s))}</div>
+                    </div>
+                    <div class="inline" style="gap:8px;">
+                      <span class="badge">${count} issues</span>
+                      <button class="btn" type="button" data-action="view-sprint" data-sprint-id="${escapeText(
+                        s.id,
+                      )}">View</button>
+                      <button class="btn" type="button" data-action="report-sprint" data-sprint-id="${escapeText(
+                        s.id,
+                      )}">Report</button>
+                    </div>
+                  </div>
+                `;
+              })
+              .join("")}
+          </div>
+        </div>
+      `;
+
   backlogRoot.innerHTML = backlog
     .map((t) =>
       renderTaskRow(t, {
@@ -689,15 +763,29 @@ function renderScrumBacklog() {
       await startSprint(sprintId);
     } else if (action === "delete-sprint") {
       await deletePlannedSprint(sprintId);
+    } else if (action === "view-sprint") {
+      const select = document.getElementById("activeSprintSelect");
+      if (select) select.value = sprintId;
+      renderScrumControls();
+      renderScrumSprintBoard();
+    } else if (action === "report-sprint") {
+      openSprintReportModal();
+      const rs = document.getElementById("reportSprintSelect");
+      if (rs) rs.value = sprintId;
+      renderSprintReport(sprintId);
     }
   };
 
   plannedRoot.onclick = onClick;
+  completedRoot.onclick = onClick;
   backlogRoot.onclick = onClick;
 
   // Open task modal on card click (not on button)
   plannedRoot.querySelectorAll(".task-card").forEach((card) => {
     card.addEventListener("click", (e) => {
+      if (e.target.closest("[data-action]")) return;
+    });
+    card.addEventListener("dblclick", (e) => {
       if (e.target.closest("[data-action]")) return;
       const id = card.dataset.taskId;
       const task = state.tasksById.get(id);
@@ -709,6 +797,9 @@ function renderScrumBacklog() {
   });
   backlogRoot.querySelectorAll(".task-card").forEach((card) => {
     card.addEventListener("click", (e) => {
+      if (e.target.closest("[data-action]")) return;
+    });
+    card.addEventListener("dblclick", (e) => {
       if (e.target.closest("[data-action]")) return;
       const id = card.dataset.taskId;
       const task = state.tasksById.get(id);
@@ -779,7 +870,14 @@ function renderTasks() {
       const task = state.tasksById.get(id);
       if (!task) return;
       if (state.bulk.enabled) toggleSelected(id);
-      else openTaskModal({ mode: "edit", task });
+    });
+
+    card.addEventListener("dblclick", () => {
+      if (state.bulk.enabled) return;
+      const id = card.dataset.taskId;
+      const task = state.tasksById.get(id);
+      if (!task) return;
+      openTaskModal({ mode: "edit", task });
     });
 
     card.addEventListener("keydown", (e) => onCardKeyDown(e, card));
@@ -880,6 +978,7 @@ function renderBulkBar() {
 function setBulkEnabled(enabled) {
   state.bulk.enabled = Boolean(enabled);
   if (!state.bulk.enabled) state.bulk.selected.clear();
+  if (state.bulk.enabled) setUndo(null);
   const btn = document.getElementById("bulkToggleBtn");
   if (btn) {
     btn.setAttribute("aria-pressed", String(state.bulk.enabled));
@@ -898,14 +997,13 @@ function toggleSelected(taskId) {
 
 async function undoLast() {
   const undo = state.undo;
-  state.undo = null;
+  setUndo(null);
   if (!undo) return;
   try {
     if (undo.type === "restore_tasks") {
       await saveTasks(undo.tasks);
       for (const t of undo.tasks) state.tasksById.set(t.id, normalizeTask(t));
       state.tasks = [...state.tasksById.values()].sort(byOrderThenDate);
-      showToast("Undone.", { timeoutMs: 2400 });
       renderColumns();
     }
   } catch (err) {
@@ -938,11 +1036,7 @@ async function moveTask(taskId, toStatus, { source = "move" } = {}) {
     state.tasks = [...state.tasksById.values()].sort(byOrderThenDate);
     await logEvent("task_moved", { taskId, from: before.status, to: toStatus, source });
 
-    state.undo = { type: "restore_tasks", tasks: [before] };
-    showToast(`Moved to ${COLUMN_LABELS[toStatus]}.`, {
-      actions: [{ label: "Undo", onClick: () => undoLast() }],
-      timeoutMs: 6000,
-    });
+    setUndo({ type: "restore_tasks", tasks: [before] }, { timeoutMs: 12000 });
 
     await recordActiveSprintSnapshot();
     renderColumns();
@@ -979,8 +1073,7 @@ async function reorderWithinStatus(taskId, direction) {
     state.tasks = [...state.tasksById.values()].sort(byOrderThenDate);
     await logEvent("task_reordered", { taskId: a.id, withTaskId: b.id, status: task.status });
 
-    state.undo = { type: "restore_tasks", tasks: [a, b] };
-    showToast("Reordered.", { actions: [{ label: "Undo", onClick: () => undoLast() }], timeoutMs: 5000 });
+    setUndo({ type: "restore_tasks", tasks: [a, b] }, { timeoutMs: 12000 });
     renderColumns();
   } catch (err) {
     showToast(err?.message || "Reorder failed.", { kind: "error" });
@@ -1146,7 +1239,13 @@ async function persistTaskPositionsFromDOM(rootEl, { defaultSprintId = null } = 
       if (!existing) return;
       touchedTaskIds.add(taskId);
       const nextSprintId = defaultSprintId != null ? defaultSprintId : existing.sprintId || "";
-      if (existing.status !== status || existing.order !== idx || (existing.sprintId || "") !== (nextSprintId || "")) {
+      const nextBacklogOnly = defaultSprintId != null ? false : Boolean(existing.backlogOnly);
+      if (
+        existing.status !== status ||
+        existing.order !== idx ||
+        (existing.sprintId || "") !== (nextSprintId || "") ||
+        Boolean(existing.backlogOnly) !== nextBacklogOnly
+      ) {
         const ts = nowISO();
         updates.push(
           normalizeTask({
@@ -1155,6 +1254,7 @@ async function persistTaskPositionsFromDOM(rootEl, { defaultSprintId = null } = 
             order: idx,
             updatedAt: ts,
             sprintId: nextSprintId,
+            backlogOnly: nextBacklogOnly,
             doneAt: status === "done" ? (existing.doneAt || ts) : existing.doneAt || "",
           }),
         );
@@ -1171,8 +1271,7 @@ async function persistTaskPositionsFromDOM(rootEl, { defaultSprintId = null } = 
     await logEvent("task_dragdrop", { count: updates.length });
     await recordActiveSprintSnapshot();
 
-    state.undo = { type: "restore_tasks", tasks: before };
-    showToast("Updated.", { actions: [{ label: "Undo", onClick: () => undoLast() }], timeoutMs: 5000 });
+    setUndo({ type: "restore_tasks", tasks: before }, { timeoutMs: 12000 });
   } catch (err) {
     showToast(err?.message || "Update failed.", { kind: "error" });
   }
@@ -1207,9 +1306,9 @@ async function persistScrumAssignmentsFromDOM() {
         const id = card.dataset.taskId;
         const existing = state.tasksById.get(id);
         if (!existing) return;
-        if ((existing.sprintId || "") !== sprintId) {
+        if ((existing.sprintId || "") !== sprintId || existing.backlogOnly) {
           const ts = nowISO();
-          updates.push(normalizeTask({ ...existing, sprintId, updatedAt: ts }));
+          updates.push(normalizeTask({ ...existing, sprintId, backlogOnly: false, updatedAt: ts }));
           scopeChanges.push({ taskId: existing.id, fromSprintId: existing.sprintId || "", toSprintId: sprintId });
         }
       });
@@ -1222,9 +1321,9 @@ async function persistScrumAssignmentsFromDOM() {
       const id = card.dataset.taskId;
       const existing = state.tasksById.get(id);
       if (!existing) return;
-      if (existing.sprintId) {
+      if (existing.sprintId || !existing.backlogOnly) {
         const ts = nowISO();
-        updates.push(normalizeTask({ ...existing, sprintId: "", updatedAt: ts }));
+        updates.push(normalizeTask({ ...existing, sprintId: "", backlogOnly: true, updatedAt: ts }));
         scopeChanges.push({ taskId: existing.id, fromSprintId: existing.sprintId || "", toSprintId: "" });
       }
     });
@@ -1242,7 +1341,7 @@ async function persistScrumAssignmentsFromDOM() {
 
     await logEvent("task_sprint_assignment_drag", { count: updates.length });
     await recordActiveSprintSnapshot();
-    showToast("Updated.", { timeoutMs: 2200 });
+    // Success toasts removed (avoid distractions)
   } catch (err) {
     showToast(err?.message || "Update failed.", { kind: "error" });
   }
@@ -1501,8 +1600,9 @@ function renderMarkdown(md) {
   return `<p>${joined}</p>`;
 }
 
-function openTaskModal({ mode, task, initialStatus, initialSprintId }) {
+function openTaskModal({ mode, task, initialStatus, initialSprintId, initialBacklogOnly } = {}) {
   const idInput = el("taskId");
+  const backlogOnlyInput = document.getElementById("taskBacklogOnly");
   const titleInput = el("taskTitle");
   const descInput = el("taskDescription");
   const statusSelect = el("taskStatus");
@@ -1525,6 +1625,7 @@ function openTaskModal({ mode, task, initialStatus, initialSprintId }) {
   if (mode === "edit" && task) {
     el("taskModalTitle").textContent = "Edit task";
     idInput.value = task.id;
+    if (backlogOnlyInput) backlogOnlyInput.value = task.backlogOnly ? "1" : "0";
     titleInput.value = task.title || "";
     descInput.value = task.description || "";
     statusSelect.value = task.status || "todo";
@@ -1544,6 +1645,7 @@ function openTaskModal({ mode, task, initialStatus, initialSprintId }) {
   } else {
     el("taskModalTitle").textContent = "New task";
     idInput.value = "";
+    if (backlogOnlyInput) backlogOnlyInput.value = initialBacklogOnly ? "1" : "0";
     titleInput.value = "";
     descInput.value = "";
     statusSelect.value = initialStatus || "todo";
@@ -1597,6 +1699,7 @@ async function onSaveTask(e) {
   const labels = parseLabels(document.getElementById("taskLabels")?.value || "");
   const epicId = document.getElementById("taskEpic")?.value || "";
   const sprintId = document.getElementById("taskSprint")?.value || "";
+  let backlogOnly = (document.getElementById("taskBacklogOnly")?.value || "0") === "1";
   const blocked = Boolean(document.getElementById("taskBlocked")?.checked);
   const checklist = readChecklistFromUI();
   const attachments = readAttachmentsFromUI();
@@ -1620,6 +1723,8 @@ async function onSaveTask(e) {
   }
 
   const doneAt = status === "done" ? existing?.doneAt || timestamp : existing?.doneAt || "";
+  if (state.viewMode === "scrum" && !sprintId) backlogOnly = true;
+  if (sprintId) backlogOnly = false;
 
   const task = normalizeTask({
     id: existing?.id || makeId(),
@@ -1632,6 +1737,7 @@ async function onSaveTask(e) {
     assignee,
     epicId,
     sprintId,
+    backlogOnly,
     dueDate,
     labels,
     blocked,
@@ -1663,7 +1769,7 @@ async function onSaveTask(e) {
 
     state.modal.dirty = false;
     closeModal({ force: true });
-    showToast("Saved.", { timeoutMs: 2200 });
+    // Success toasts removed (avoid distractions)
     await recordActiveSprintSnapshot();
     renderColumns();
   } catch (err) {
@@ -1684,8 +1790,7 @@ async function onDeleteTask() {
     state.tasks = [...state.tasksById.values()].sort(byOrderThenDate);
     await logEvent("task_deleted", { taskId: id, from: task.status });
 
-    state.undo = { type: "restore_tasks", tasks: [{ ...task }] };
-    showToast("Deleted.", { actions: [{ label: "Undo", onClick: () => undoLast() }], timeoutMs: 7000 });
+    setUndo({ type: "restore_tasks", tasks: [{ ...task }] }, { timeoutMs: 12000 });
 
     state.modal.dirty = false;
     closeModal({ force: true });
@@ -1723,7 +1828,7 @@ async function onDuplicateTask() {
     state.tasksById.set(copy.id, copy);
     state.tasks = [...state.tasksById.values()].sort(byOrderThenDate);
     await logEvent("task_duplicated", { fromTaskId: task.id, taskId: copy.id });
-    showToast("Duplicated to To Do.", { timeoutMs: 2500 });
+    // Success toasts removed (avoid distractions)
     renderColumns();
   } catch (err) {
     showToast(err?.message || "Duplicate failed.", { kind: "error" });
@@ -1775,6 +1880,7 @@ async function onQuickAdd() {
   }
 
   const ts = nowISO();
+  const backlogOnly = state.viewMode === "scrum";
   const task = normalizeTask({
     id: makeId(),
     boardId: state.activeBoardId,
@@ -1786,6 +1892,7 @@ async function onQuickAdd() {
     assignee: "",
     epicId: "",
     sprintId: "",
+    backlogOnly,
     dueDate: "",
     labels: [],
     blocked: false,
@@ -1803,7 +1910,7 @@ async function onQuickAdd() {
     state.tasks = [...state.tasksById.values()].sort(byOrderThenDate);
     await logEvent("task_created", { taskId: task.id, quick: true });
     input.value = "";
-    showToast("Added.", { timeoutMs: 2000 });
+    // Success toasts removed (avoid distractions)
     renderColumns();
   } catch (err) {
     showToast(err?.message || "Add failed.", { kind: "error" });
@@ -1819,7 +1926,7 @@ async function onResetBoard() {
     await logEvent("board_reset", { boardId: board.id });
     state.tasksById.clear();
     state.tasks = [];
-    showToast("Board reset.", { timeoutMs: 2400 });
+    // Success toasts removed (avoid distractions)
     renderColumns();
   } catch (err) {
     showToast(err?.message || "Reset failed.", { kind: "error" });
@@ -1848,7 +1955,7 @@ async function onExportBoard() {
     tasks: state.tasks,
   };
   downloadJson(`${board.name.replace(/[^\w.-]+/g, "_")}.json`, payload);
-  showToast("Exported.", { timeoutMs: 2200 });
+  // Success toasts removed (avoid distractions)
 }
 
 async function onImportFile(file) {
@@ -1895,7 +2002,6 @@ async function onImportFile(file) {
       await saveTasks(importedTasks);
       await logEvent("import", { mode: "merge", count: importedTasks.length });
     }
-    showToast("Imported.", { timeoutMs: 2400 });
     await reloadAndRerender();
   } catch (err) {
     showToast(err?.message || "Import failed.", { kind: "error" });
@@ -1961,7 +2067,7 @@ async function onSaveSettings(e) {
     await logEvent("board_settings", { groupBy });
     closeOverlayModal("settingsModal", { force: true });
     await reloadAndRerender();
-    showToast("Settings saved.", { timeoutMs: 2200 });
+    // Success toasts removed (avoid distractions)
   } catch (err) {
     showToast(err?.message || "Settings save failed.", { kind: "error" });
   }
@@ -2141,7 +2247,7 @@ function renderEpicsList() {
       await saveEpic(updated);
       await loadEpics();
       renderEpicsList();
-      showToast("Epic saved.", { timeoutMs: 2200 });
+      // Success toasts removed (avoid distractions)
     });
   });
 
@@ -2161,7 +2267,6 @@ function renderEpicsList() {
         await loadTasks();
         await loadEpics();
         renderEpicsList();
-        showToast("Epic deleted.", { timeoutMs: 2200 });
         renderColumns();
       } catch (err) {
         showToast(err?.message || "Epic delete failed.", { kind: "error" });
@@ -2266,28 +2371,33 @@ async function startSprint(sprintId) {
 
   await reloadAndRerender();
   await recordActiveSprintSnapshot();
-  showToast("Sprint started.", { timeoutMs: 2200 });
+  // Success toasts removed (avoid distractions)
 }
 
 async function completeActiveSprint() {
   const active = getActiveSprint();
   if (!active) return;
-  if (!confirm(`Complete sprint "${active.name}"? Incomplete issues will move to backlog.`)) return;
+  if (!confirm(`Complete sprint "${active.name}"?`)) return;
+  const moveToBacklog = confirm(
+    `Move unfinished issues to Product Backlog?\n\nOK = Move to backlog (recommended)\nCancel = Keep them in the completed sprint`,
+  );
 
   const completedAt = nowISO();
   const updatedSprint = { ...active, status: "completed", completedAt, updatedAt: completedAt };
 
-  const movedOut = state.tasks
-    .filter((t) => t.sprintId === active.id && t.status !== "done")
-    .map((t) => normalizeTask({ ...t, sprintId: "", updatedAt: completedAt }));
+  const movedOut = moveToBacklog
+    ? state.tasks
+        .filter((t) => t.sprintId === active.id && t.status !== "done")
+        .map((t) => normalizeTask({ ...t, sprintId: "", backlogOnly: true, updatedAt: completedAt }))
+    : [];
 
   await saveSprint(updatedSprint);
   if (movedOut.length) await saveTasks(movedOut);
   await updateBoardSettings(state.activeBoardId, { activeSprintId: null });
-  await logEvent("sprint_completed", { sprintId: active.id, movedToBacklog: movedOut.length });
+  await logEvent("sprint_completed", { sprintId: active.id, movedToBacklog: movedOut.length, moveToBacklog });
 
   await reloadAndRerender();
-  showToast("Sprint completed.", { timeoutMs: 2200 });
+  // Success toasts removed (avoid distractions)
 }
 
 async function deletePlannedSprint(sprintId) {
@@ -2305,7 +2415,7 @@ async function deletePlannedSprint(sprintId) {
   await deleteSprint(sprint.id);
   await logEvent("sprint_deleted", { sprintId: sprint.id, movedToBacklog: moved.length });
   await reloadAndRerender();
-  showToast("Sprint deleted.", { timeoutMs: 2200 });
+  // Success toasts removed (avoid distractions)
 }
 
 async function noteSprintScopeChange({ fromSprintId, toSprintId, taskId }) {
@@ -2344,7 +2454,7 @@ async function addTaskToSprint(taskId, sprintId) {
     return;
   }
   const ts = nowISO();
-  const updated = normalizeTask({ ...task, sprintId: sprint.id, updatedAt: ts });
+  const updated = normalizeTask({ ...task, sprintId: sprint.id, backlogOnly: false, updatedAt: ts });
   try {
     await saveTask(updated);
     await noteSprintScopeChange({ fromSprintId: task.sprintId || "", toSprintId: sprint.id, taskId });
@@ -2362,7 +2472,7 @@ async function removeTaskFromSprint(taskId) {
   const task = state.tasksById.get(taskId);
   if (!task) return;
   const ts = nowISO();
-  const updated = normalizeTask({ ...task, sprintId: "", updatedAt: ts });
+  const updated = normalizeTask({ ...task, sprintId: "", backlogOnly: true, updatedAt: ts });
   try {
     await saveTask(updated);
     await noteSprintScopeChange({ fromSprintId: task.sprintId || "", toSprintId: "", taskId });
@@ -2499,8 +2609,7 @@ async function onBulkMove() {
     for (const t of updates) state.tasksById.set(t.id, t);
     state.tasks = [...state.tasksById.values()].sort(byOrderThenDate);
     await logEvent("bulk_move", { count: updates.length, to: target });
-    state.undo = { type: "restore_tasks", tasks: before };
-    showToast("Moved.", { actions: [{ label: "Undo", onClick: () => undoLast() }], timeoutMs: 7000 });
+    setUndo({ type: "restore_tasks", tasks: before }, { timeoutMs: 12000 });
     state.bulk.selected.clear();
     renderBulkBar();
     renderColumns();
@@ -2519,8 +2628,7 @@ async function onBulkDelete() {
     for (const id of selected) state.tasksById.delete(id);
     state.tasks = [...state.tasksById.values()].sort(byOrderThenDate);
     await logEvent("bulk_delete", { count: selected.length });
-    state.undo = { type: "restore_tasks", tasks: before };
-    showToast("Deleted.", { actions: [{ label: "Undo", onClick: () => undoLast() }], timeoutMs: 8000 });
+    setUndo({ type: "restore_tasks", tasks: before }, { timeoutMs: 12000 });
     state.bulk.selected.clear();
     renderBulkBar();
     renderColumns();
@@ -2536,7 +2644,7 @@ async function onNewBoard() {
   state.activeBoardId = board.id;
   await logEvent("board_created", { boardId: board.id });
   await reloadAndRerender();
-  showToast("Board created.", { timeoutMs: 2200 });
+  // Success toasts removed (avoid distractions)
 }
 
 async function onRenameBoard() {
@@ -2638,7 +2746,7 @@ function wireEvents() {
     if (!sprint) return;
     closeOverlayModal("sprintModal", { force: true });
     await reloadAndRerender();
-    showToast("Sprint created.", { timeoutMs: 2200 });
+    // Success toasts removed (avoid distractions)
   });
 
   document.getElementById("activeSprintSelect")?.addEventListener("change", () => {
@@ -2653,7 +2761,7 @@ function wireEvents() {
   document.getElementById("completeSprintBtn")?.addEventListener("click", completeActiveSprint);
   document.getElementById("sprintReportBtn")?.addEventListener("click", () => openSprintReportModal());
   document.getElementById("newBacklogIssueBtn")?.addEventListener("click", () =>
-    openTaskModal({ mode: "new", initialStatus: "todo", initialSprintId: "" }),
+    openTaskModal({ mode: "new", initialStatus: "todo", initialSprintId: "", initialBacklogOnly: true }),
   );
   document.getElementById("closeSprintReportBtn")?.addEventListener("click", () =>
     closeOverlayModal("sprintReportModal", { force: true }),
@@ -2675,7 +2783,7 @@ function wireEvents() {
     if (!epic) return;
     input.value = "";
     renderEpicsList();
-    showToast("Epic created.", { timeoutMs: 2200 });
+    // Success toasts removed (avoid distractions)
   });
 
   document.getElementById("refreshBtn")?.addEventListener("click", () => {
@@ -2683,6 +2791,8 @@ function wireEvents() {
     if (state.swRegistration?.waiting) state.swRegistration.waiting.postMessage({ type: "SKIP_WAITING" });
     else location.reload();
   });
+
+  document.getElementById("undoBtn")?.addEventListener("click", () => undoLast());
 
   el("closeModalBtn").addEventListener("click", () => closeModal());
   el("modalBackdrop").addEventListener("click", () => {
@@ -2707,7 +2817,7 @@ function wireEvents() {
     fillEpicOptions(select, epic.id);
     if (select) select.value = epic.id;
     state.modal.dirty = true;
-    showToast("Epic created.", { timeoutMs: 2200 });
+    // Success toasts removed (avoid distractions)
   });
 
   document.getElementById("togglePreviewBtn")?.addEventListener("click", () => {
@@ -2779,6 +2889,17 @@ function wireEvents() {
     else if (!el("epicsModal").hidden) closeOverlayModal("epicsModal", { force: true });
     else if (!el("sprintModal").hidden) closeOverlayModal("sprintModal", { force: true });
     else if (!el("sprintReportModal").hidden) closeOverlayModal("sprintReportModal", { force: true });
+  });
+
+  document.addEventListener("keydown", (e) => {
+    const key = String(e.key || "").toLowerCase();
+    if (key !== "z") return;
+    const isMod = e.ctrlKey || e.metaKey;
+    if (!isMod) return;
+    if (state.modal.openId) return;
+    if (!state.undo) return;
+    e.preventDefault();
+    undoLast();
   });
 
   const onAddClick = (e) => {

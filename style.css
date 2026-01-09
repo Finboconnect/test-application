@@ -97,6 +97,7 @@ body {
 .app-header .textarea,
 .app-header .btn {
   background: color-mix(in srgb, #ffffff 16%, transparent);
+  background-color: color-mix(in srgb, #ffffff 16%, transparent);
   border-color: color-mix(in srgb, #ffffff 26%, transparent);
   color: var(--header-text);
 }
@@ -112,6 +113,16 @@ body {
 .app-header .btn-danger {
   background: color-mix(in srgb, var(--danger) 26%, transparent);
   border-color: color-mix(in srgb, #ffffff 26%, transparent);
+}
+
+.select option {
+  color: var(--text);
+  background: var(--surface);
+}
+
+.app-header .select option {
+  color: #172b4d;
+  background: #ffffff;
 }
 
 .toolbar {
@@ -237,11 +248,10 @@ body {
 }
 
 .columns {
-  height: 100%;
   display: grid;
   grid-template-columns: repeat(5, minmax(260px, 1fr));
   gap: 12px;
-  align-items: start;
+  align-items: stretch;
   overflow: auto;
   padding-bottom: 8px;
   -webkit-overflow-scrolling: touch;
@@ -255,6 +265,7 @@ body {
   display: flex;
   flex-direction: column;
   min-height: 0;
+  height: 100%;
 }
 
 .column-header {
@@ -287,7 +298,8 @@ body {
   flex-direction: column;
   gap: 10px;
   overflow: auto;
-  min-height: 48px;
+  flex: 1 1 auto;
+  min-height: 160px;
 }
 
 .task-card {
@@ -457,6 +469,7 @@ body {
   border-radius: 12px;
   border: 1px solid var(--border);
   background: color-mix(in srgb, var(--surface) 92%, transparent);
+  background-color: color-mix(in srgb, var(--surface) 92%, transparent);
   color: var(--text);
   padding: 10px 10px;
   outline: none;

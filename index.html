@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Kanban</title>
     <meta name="color-scheme" content="light dark" />
-    <link rel="stylesheet" href="style.css?v=2026-01-09-5" />
+    <link rel="stylesheet" href="style.css?v=2026-01-09-9" />
   </head>
   <body>
     <header class="app-header">
@@ -68,6 +68,7 @@
         </label>
 
         <div class="toolbar-buttons">
+          <button id="undoBtn" class="btn" type="button" hidden>Undo</button>
           <button id="bulkToggleBtn" class="btn" type="button" aria-pressed="false">Bulk</button>
           <button id="epicsBtn" class="btn" type="button">Epics</button>
           <button id="exportBtn" class="btn" type="button">Export</button>
@@ -120,6 +121,7 @@
             </div>
           </div>
           <div id="plannedSprints" class="planned"></div>
+          <div id="completedSprints" class="planned"></div>
           <div id="backlogList" class="backlog-list" aria-label="Backlog list"></div>
         </section>
       </div>
@@ -170,6 +172,7 @@
         </div>
 
         <input id="taskId" type="hidden" />
+        <input id="taskBacklogOnly" type="hidden" value="0" />
 
         <label class="field">
           <span class="field-label">Title</span>
@@ -427,6 +430,6 @@
       <div class="noscript">This app requires JavaScript.</div>
     </noscript>
 
-    <script type="module" src="script.js?v=2026-01-09-5"></script>
+    <script type="module" src="script.js?v=2026-01-09-9"></script>
   </body>
 </html>
