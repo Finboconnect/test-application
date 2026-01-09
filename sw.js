@@ -1,9 +1,10 @@
-const APP_VERSION = "2026-01-09-9";
+const APP_VERSION = "2026-01-09-14";
 const CACHE_NAME = `kanban-static-${APP_VERSION}`;
 const ASSETS = [
   "./",
   "./index.html",
   `./style.css?v=${APP_VERSION}`,
+  `./vendor/Sortable.min.js?v=${APP_VERSION}`,
   `./script.js?v=${APP_VERSION}`,
   `./db.js?v=${APP_VERSION}`,
   `./boards.js?v=${APP_VERSION}`,

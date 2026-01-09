@@ -3,18 +3,20 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Kanban</title>
+    <title>Agile Board</title>
     <meta name="color-scheme" content="light dark" />
-    <link rel="stylesheet" href="style.css?v=2026-01-09-9" />
+    <link rel="stylesheet" href="style.css?v=2026-01-09-14" />
   </head>
   <body>
     <header class="app-header">
       <div class="brand">
-        <div class="brand-title">Kanban</div>
-        <div class="brand-subtitle">Offline - IndexedDB - Multi-board</div>
+        <div class="brand-title">
+          Agile Board <span id="versionPill" class="badge version-pill"></span>
+        </div>
+        <div class="brand-subtitle">Offline &bull; IndexedDB &bull; Multi-board</div>
       </div>
 
-      <div class="toolbar" role="toolbar" aria-label="Kanban controls">
+      <div class="toolbar" role="toolbar" aria-label="Agile board controls">
         <label class="field">
           <span class="field-label">View</span>
           <select id="viewMode" class="select" aria-label="Select view mode">
@@ -90,6 +92,11 @@
         <button id="refreshBtn" class="btn btn-primary" type="button">Refresh</button>
       </div>
 
+      <div id="backupBanner" class="banner" hidden role="status" aria-live="polite">
+        <div class="banner-text">Backup recommended: export your board.</div>
+        <button id="backupExportBtn" class="btn btn-primary" type="button">Export now</button>
+      </div>
+
       <div id="scrumView" hidden>
         <section class="scrum-section">
           <div class="scrum-bar">
@@ -127,7 +134,7 @@
       </div>
 
       <div id="kanbanView">
-        <div id="columns" class="columns" aria-label="Kanban board"></div>
+      <div id="columns" class="columns" aria-label="Agile board"></div>
       </div>
     </main>
 
@@ -153,7 +160,9 @@
     </div>
 
     <input id="importFileInput" type="file" accept="application/json,.json" hidden />
+    <datalist id="assigneesDatalist"></datalist>
     <div id="toastRoot" class="toast-root" aria-live="polite" aria-atomic="true"></div>
+    <div id="liveRegion" class="sr-only" aria-live="polite" aria-atomic="true"></div>
 
     <div id="modalBackdrop" class="modal-backdrop" hidden></div>
 
@@ -181,15 +190,17 @@
 
         <label class="field">
           <span class="field-label">Description</span>
-          <textarea id="taskDescription" class="textarea" rows="5"></textarea>
+          <div id="mdSplit" class="md-split">
+            <textarea id="taskDescription" class="textarea" rows="7"></textarea>
+            <div id="mdPreview" class="md-preview" hidden></div>
+          </div>
           <div class="inline">
-            <button id="togglePreviewBtn" class="btn" type="button">Preview</button>
+            <button id="togglePreviewBtn" class="btn" type="button">Split preview</button>
             <span class="muted" style="font-size: 12px">Markdown supported</span>
           </div>
-          <div id="mdPreview" class="md-preview" hidden></div>
         </label>
 
-        <div class="grid-2">
+        <div class="grid-3">
           <label class="field">
             <span class="field-label">Status</span>
             <select id="taskStatus" class="select">
@@ -210,12 +221,24 @@
               <option value="high">High</option>
             </select>
           </label>
+
+          <label class="field">
+            <span class="field-label">Story points</span>
+            <input id="taskPoints" class="input" type="number" min="0" step="1" placeholder="0" />
+          </label>
         </div>
 
         <div class="grid-2">
           <label class="field">
             <span class="field-label">Assigned to</span>
-            <input id="taskAssignee" class="input" type="text" placeholder="Name..." maxlength="80" />
+            <input
+              id="taskAssignee"
+              class="input"
+              type="text"
+              placeholder="Name..."
+              maxlength="80"
+              list="assigneesDatalist"
+            />
           </label>
           <label class="field">
             <span class="field-label">Due date</span>
@@ -315,6 +338,28 @@
         <div id="wipGrid" class="wip-grid"></div>
         <div id="policyGrid" class="policy-grid"></div>
 
+        <div class="section">
+          <div class="section-title">Columns</div>
+          <div class="muted" style="font-size: 12px; margin-top: -6px">
+            Reorder, hide, and choose which columns count as done.
+          </div>
+          <div id="columnManager" class="list"></div>
+        </div>
+
+        <div class="section">
+          <div class="section-title">Assignees</div>
+          <div class="muted" style="font-size: 12px; margin-top: -6px">Comma separated list used for suggestions.</div>
+          <input id="assigneesInput" class="input" type="text" placeholder="Alice, Bob, Charlie" />
+        </div>
+
+        <div class="section">
+          <div class="section-title">Admin</div>
+          <div class="inline">
+            <button id="clearCacheBtn" class="btn" type="button">Reset offline cache</button>
+            <span id="settingsVersion" class="muted" style="font-size: 12px"></span>
+          </div>
+        </div>
+
         <div class="modal-actions">
           <div class="spacer"></div>
           <button id="saveSettingsBtn" class="btn btn-primary" type="submit">Save settings</button>
@@ -380,6 +425,11 @@
           <input id="sprintName" class="input" type="text" maxlength="80" required />
         </label>
 
+        <label class="field">
+          <span class="field-label">Goal</span>
+          <input id="sprintGoal" class="input" type="text" maxlength="140" placeholder="Sprint goal (optional)" />
+        </label>
+
         <div class="grid-2">
           <label class="field">
             <span class="field-label">Start date</span>
@@ -426,10 +476,41 @@
       </div>
     </div>
 
+    <div id="shortcutsModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="shortcutsModalTitle" hidden>
+      <div class="modal-card">
+        <div class="modal-header">
+          <div>
+            <div id="shortcutsModalTitle" class="modal-title">Keyboard shortcuts</div>
+            <div class="modal-meta"><span class="muted">Quick navigation</span></div>
+          </div>
+          <button id="closeShortcutsBtn" class="btn btn-icon" type="button" aria-label="Close shortcuts">
+            <span aria-hidden="true">x</span>
+          </button>
+        </div>
+        <div class="section">
+          <div class="section-title">General</div>
+          <div class="list">
+            <div class="list-item"><div class="list-item-left"><div class="list-item-text">Open shortcuts</div></div><div class="muted">?</div></div>
+            <div class="list-item"><div class="list-item-left"><div class="list-item-text">Undo</div></div><div class="muted">Ctrl+Z</div></div>
+            <div class="list-item"><div class="list-item-left"><div class="list-item-text">Close modal</div></div><div class="muted">Esc</div></div>
+          </div>
+        </div>
+        <div class="section">
+          <div class="section-title">Task</div>
+          <div class="list">
+            <div class="list-item"><div class="list-item-left"><div class="list-item-text">Open task</div></div><div class="muted">Double-click or Enter</div></div>
+            <div class="list-item"><div class="list-item-left"><div class="list-item-text">Move left/right</div></div><div class="muted">Arrow keys</div></div>
+            <div class="list-item"><div class="list-item-left"><div class="list-item-text">Reorder up/down</div></div><div class="muted">Arrow up/down</div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <noscript>
       <div class="noscript">This app requires JavaScript.</div>
     </noscript>
 
-    <script type="module" src="script.js?v=2026-01-09-9"></script>
+    <script src="vendor/Sortable.min.js?v=2026-01-09-14"></script>
+    <script type="module" src="script.js?v=2026-01-09-14"></script>
   </body>
 </html>

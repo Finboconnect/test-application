@@ -1,4 +1,4 @@
-import { getBoards, getSetting, makeId, saveBoard, setSetting, deleteBoard } from "./db.js?v=2026-01-09-9";
+import { getBoards, getSetting, makeId, saveBoard, setSetting, deleteBoard } from "./db.js?v=2026-01-09-14";
 
 export const COLUMN_IDS = ["todo", "inprogress", "review", "test", "done"];
 
@@ -22,6 +22,10 @@ export function makeBoard(name) {
     id: makeId(),
     name: (name || "My Board").trim() || "My Board",
     columns: [...COLUMN_IDS],
+    columnNames: {},
+    columnVisibility: Object.fromEntries(COLUMN_IDS.map((c) => [c, true])),
+    doneStatuses: ["done"],
+    assignees: [],
     wipLimits: Object.fromEntries(COLUMN_IDS.map((c) => [c, null])),
     columnPolicies: Object.fromEntries(COLUMN_IDS.map((c) => [c, ""])),
     groupBy: "none",
@@ -68,13 +72,32 @@ export async function renameBoard(boardId, name) {
   return board;
 }
 
-export async function updateBoardSettings(boardId, { wipLimits, columnPolicies, groupBy, viewMode, activeSprintId }) {
+export async function updateBoardSettings(
+  boardId,
+  {
+    wipLimits,
+    columnPolicies,
+    columnNames,
+    columns,
+    columnVisibility,
+    doneStatuses,
+    assignees,
+    groupBy,
+    viewMode,
+    activeSprintId,
+  },
+) {
   const boards = await getBoards();
   const board = boards.find((b) => b.id === boardId);
   if (!board) throw new Error("Board not found");
 
   if (wipLimits && typeof wipLimits === "object") board.wipLimits = wipLimits;
   if (columnPolicies && typeof columnPolicies === "object") board.columnPolicies = columnPolicies;
+  if (columnNames && typeof columnNames === "object") board.columnNames = columnNames;
+  if (Array.isArray(columns) && columns.length) board.columns = columns;
+  if (columnVisibility && typeof columnVisibility === "object") board.columnVisibility = columnVisibility;
+  if (Array.isArray(doneStatuses)) board.doneStatuses = doneStatuses;
+  if (Array.isArray(assignees)) board.assignees = assignees;
   if (groupBy) board.groupBy = groupBy;
   if (viewMode === "kanban" || viewMode === "scrum") board.viewMode = viewMode;
   if (activeSprintId === null || typeof activeSprintId === "string") board.activeSprintId = activeSprintId;

@@ -5,6 +5,7 @@ import {
   getBoards,
   getEpics,
   getEvents,
+  getSetting,
   getSprints,
   getSprintSnapshots,
   getTasks,
@@ -14,10 +15,11 @@ import {
   saveSprint,
   saveTask,
   saveTasks,
+  setSetting,
   deleteEpic,
   deleteSprint,
   upsertSprintSnapshot,
-} from "./db.js?v=2026-01-09-9";
+} from "./db.js?v=2026-01-09-14";
 import {
   COLUMN_IDS,
   COLUMN_LABELS,
@@ -28,8 +30,8 @@ import {
   renameBoard,
   setActiveBoardId,
   updateBoardSettings,
-} from "./boards.js?v=2026-01-09-9";
-import { initTheme, toggleTheme } from "./theme.js?v=2026-01-09-9";
+} from "./boards.js?v=2026-01-09-14";
+import { initTheme, toggleTheme } from "./theme.js?v=2026-01-09-14";
 
 const state = {
   boards: [],
@@ -45,11 +47,14 @@ const state = {
   activeSprintId: null,
   draggingEl: null,
   draggingFrom: null,
+  sortables: [],
   filter: { search: "", priority: "", groupBy: "none" },
   bulk: { enabled: false, selected: new Set() },
-  modal: { openId: null, dirty: false, preview: false, focusTrapCleanup: null },
+  modal: { openId: null, dirty: false, preview: false, focusTrapCleanup: null, returnFocusById: {} },
   undo: null,
   undoTimer: null,
+  appSettings: { snapshotEvery: 10, backupChanges: 0, lastExportAt: "" },
+  backupPersistTimer: null,
   swRegistration: null,
   updateRequested: false,
 };
@@ -58,7 +63,7 @@ function nowISO() {
   return new Date().toISOString();
 }
 
-const APP_VERSION = "2026-01-09-9";
+const APP_VERSION = "2026-01-09-14";
 
 function parseLabels(input) {
   if (!input) return [];
@@ -72,6 +77,20 @@ function parseLabels(input) {
 
 function ensureBoardDefaults(board) {
   const b = { ...board };
+  b.columnNames = b.columnNames && typeof b.columnNames === "object" ? b.columnNames : {};
+  b.columns = Array.isArray(b.columns) && b.columns.length ? b.columns.slice() : [...COLUMN_IDS];
+  // Ensure columns contains all base statuses exactly once
+  for (const c of COLUMN_IDS) if (!b.columns.includes(c)) b.columns.push(c);
+  b.columns = b.columns.filter((c) => COLUMN_IDS.includes(c));
+  if (b.columns.length !== COLUMN_IDS.length) b.columns = [...COLUMN_IDS];
+
+  b.columnVisibility = b.columnVisibility && typeof b.columnVisibility === "object" ? b.columnVisibility : {};
+  for (const c of COLUMN_IDS) if (!(c in b.columnVisibility)) b.columnVisibility[c] = true;
+
+  b.doneStatuses = Array.isArray(b.doneStatuses) ? b.doneStatuses.filter((c) => COLUMN_IDS.includes(c)) : ["done"];
+  if (!b.doneStatuses.length) b.doneStatuses = ["done"];
+
+  b.assignees = Array.isArray(b.assignees) ? b.assignees.map((s) => String(s).trim()).filter(Boolean).slice(0, 50) : [];
   b.wipLimits = b.wipLimits && typeof b.wipLimits === "object" ? b.wipLimits : {};
   b.columnPolicies = b.columnPolicies && typeof b.columnPolicies === "object" ? b.columnPolicies : {};
   for (const c of COLUMN_IDS) {
@@ -84,11 +103,87 @@ function ensureBoardDefaults(board) {
   return b;
 }
 
+function statusLabel(status) {
+  const custom = state.activeBoard?.columnNames?.[status];
+  return (custom || "").trim() || COLUMN_LABELS[status] || status;
+}
+
+function orderedStatuses({ includeHidden = true } = {}) {
+  const order = state.activeBoard?.columns && Array.isArray(state.activeBoard.columns) ? state.activeBoard.columns : COLUMN_IDS;
+  const visibility = state.activeBoard?.columnVisibility || {};
+  return order.filter((s) => COLUMN_IDS.includes(s) && (includeHidden || visibility[s] !== false));
+}
+
+async function saveColumnName(status, name) {
+  if (!state.activeBoardId || !COLUMN_IDS.includes(status)) return;
+  const trimmed = String(name || "").trim();
+  const defaultsTo = COLUMN_LABELS[status] || status;
+
+  const next = { ...(state.activeBoard?.columnNames || {}) };
+  if (!trimmed || trimmed === defaultsTo) delete next[status];
+  else next[status] = trimmed.slice(0, 40);
+
+  try {
+    await updateBoardSettings(state.activeBoardId, { columnNames: next });
+    await loadBoardsAndActive();
+    renderColumns();
+    announce(`Renamed column to "${statusLabel(status)}".`);
+  } catch (err) {
+    showToast(err?.message || "Failed to rename column.", { kind: "error" });
+  }
+}
+
+function startColumnTitleEdit(titleEl) {
+  const columnEl = titleEl.closest(".column");
+  const status = columnEl?.dataset?.status || "";
+  if (!COLUMN_IDS.includes(status)) return;
+
+  const current = statusLabel(status);
+  const input = document.createElement("input");
+  input.type = "text";
+  input.className = "input column-title-input";
+  input.value = current;
+  input.setAttribute("aria-label", `Rename ${current} column`);
+
+  titleEl.replaceChildren(input);
+  input.focus();
+  input.select();
+
+  const cleanup = () => {
+    titleEl.textContent = statusLabel(status);
+  };
+
+  input.addEventListener("keydown", async (e) => {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      cleanup();
+      return;
+    }
+    if (e.key === "Enter") {
+      e.preventDefault();
+      const value = input.value;
+      cleanup();
+      await saveColumnName(status, value);
+    }
+  });
+  input.addEventListener("blur", async () => {
+    const value = input.value;
+    cleanup();
+    await saveColumnName(status, value);
+  });
+}
+
 function wipLimitFor(status) {
   const limit = state.activeBoard?.wipLimits?.[status];
   if (limit == null || limit === "") return null;
   const n = Number(limit);
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : null;
+}
+
+function isDoneStatus(status) {
+  const set = state.activeBoard?.doneStatuses;
+  if (!Array.isArray(set) || !set.length) return status === "done";
+  return set.includes(status);
 }
 
 function canPlaceInStatus(status, { excludingTaskId = null } = {}) {
@@ -104,6 +199,100 @@ function canPlaceInStatus(status, { excludingTaskId = null } = {}) {
     return true;
   }).length;
   return count < limit;
+}
+
+function isSortableEnabled() {
+  return typeof window !== "undefined" && typeof window.Sortable !== "undefined";
+}
+
+function destroySortables() {
+  for (const s of state.sortables) {
+    try {
+      s.destroy();
+    } catch {}
+  }
+  state.sortables = [];
+}
+
+function setupSortables() {
+  destroySortables();
+  if (!isSortableEnabled()) return;
+  if (state.bulk.enabled) return;
+  if (state.filter.groupBy !== "none") return;
+
+  const common = {
+    animation: 140,
+    easing: "cubic-bezier(0.2, 0, 0, 1)",
+    delay: 160,
+    delayOnTouchOnly: true,
+    touchStartThreshold: 3,
+    ghostClass: "sortable-ghost",
+    chosenClass: "sortable-chosen",
+    dragClass: "sortable-drag",
+    fallbackOnBody: true,
+    forceFallback: true,
+  };
+
+  if (state.viewMode === "kanban") {
+    const root = document.getElementById("columns");
+    if (!root) return;
+    root.querySelectorAll(".task-list").forEach((list) => {
+      const sortable = new window.Sortable(list, {
+        ...common,
+        group: "kanban",
+        onEnd: async () => {
+          await persistTaskPositionsFromDOM(root);
+          await reloadAndRerender();
+        },
+      });
+      state.sortables.push(sortable);
+    });
+    return;
+  }
+
+  // Scrum
+  const sprintRoot = document.getElementById("sprintColumns");
+  const active = getActiveSprint();
+  if (sprintRoot && active) {
+    sprintRoot.querySelectorAll(".task-list").forEach((list) => {
+      const sortable = new window.Sortable(list, {
+        ...common,
+        group: "scrum-sprint",
+        onEnd: async () => {
+          await persistTaskPositionsFromDOM(sprintRoot, { defaultSprintId: active.id });
+          await reloadAndRerender();
+        },
+      });
+      state.sortables.push(sortable);
+    });
+  }
+
+  const backlogRoot = document.getElementById("backlogList");
+  const plannedRoot = document.getElementById("plannedSprints");
+  if (backlogRoot) {
+    const sortable = new window.Sortable(backlogRoot, {
+      ...common,
+      group: "scrum-planning",
+      onEnd: async () => {
+        await persistScrumAssignmentsFromDOM();
+        await reloadAndRerender();
+      },
+    });
+    state.sortables.push(sortable);
+  }
+  if (plannedRoot) {
+    plannedRoot.querySelectorAll(".planned-body").forEach((body) => {
+      const sortable = new window.Sortable(body, {
+        ...common,
+        group: "scrum-planning",
+        onEnd: async () => {
+          await persistScrumAssignmentsFromDOM();
+          await reloadAndRerender();
+        },
+      });
+      state.sortables.push(sortable);
+    });
+  }
 }
 
 async function logEvent(type, payload) {
@@ -126,6 +315,44 @@ function byOrderThenDate(a, b) {
   const bo = typeof b.order === "number" ? b.order : 0;
   if (ao !== bo) return ao - bo;
   return String(a.updatedAt || "").localeCompare(String(b.updatedAt || ""));
+}
+
+function byRankThenDate(a, b) {
+  const ar = typeof a.rank === "number" ? a.rank : 0;
+  const br = typeof b.rank === "number" ? b.rank : 0;
+  if (ar !== br) return ar - br;
+  return String(a.updatedAt || "").localeCompare(String(b.updatedAt || ""));
+}
+
+async function moveBacklogRank(taskId, where) {
+  const backlogIds = state.tasks
+    .filter((t) => t.backlogOnly && !t.sprintId)
+    .sort(byRankThenDate)
+    .map((t) => t.id);
+  const idx = backlogIds.indexOf(taskId);
+  if (idx < 0) return;
+  backlogIds.splice(idx, 1);
+  if (where === "top") backlogIds.unshift(taskId);
+  else if (where === "bottom") backlogIds.push(taskId);
+  else return;
+
+  const ts = nowISO();
+  const updates = [];
+  backlogIds.forEach((id, i) => {
+    const t = state.tasksById.get(id);
+    if (!t) return;
+    if ((t.rank || 0) !== i) updates.push(normalizeTask({ ...t, rank: i, updatedAt: ts }));
+  });
+  if (!updates.length) return;
+  try {
+    await saveTasks(updates);
+    for (const t of updates) state.tasksById.set(t.id, t);
+    state.tasks = [...state.tasksById.values()].sort(byOrderThenDate);
+    await noteChange();
+    renderScrumBacklog();
+  } catch (err) {
+    showToast(err?.message || "Reorder failed.", { kind: "error" });
+  }
 }
 
 function el(id) {
@@ -184,6 +411,66 @@ function showToast(message, { kind = "info", actions = [], timeoutMs = 4500 } = 
 
   root.appendChild(toast);
   setTimeout(() => toast.remove(), Math.max(800, timeoutMs));
+}
+
+function announce(message) {
+  const region = document.getElementById("liveRegion");
+  if (!region) return;
+  region.textContent = "";
+  setTimeout(() => {
+    region.textContent = String(message || "");
+  }, 10);
+}
+
+async function loadAppSettings() {
+  const snapshotEvery = Number(await getSetting("snapshotEvery"));
+  const backupChanges = Number(await getSetting("backupChanges"));
+  const lastExportAt = String((await getSetting("lastExportAt")) || "");
+  state.appSettings.snapshotEvery = Number.isFinite(snapshotEvery) && snapshotEvery > 0 ? Math.floor(snapshotEvery) : 10;
+  state.appSettings.backupChanges = Number.isFinite(backupChanges) && backupChanges >= 0 ? Math.floor(backupChanges) : 0;
+  state.appSettings.lastExportAt = lastExportAt;
+  updateBackupBanner();
+}
+
+function updateBackupBanner() {
+  const banner = document.getElementById("backupBanner");
+  if (!banner) return;
+  const changes = state.appSettings.backupChanges || 0;
+  const last = state.appSettings.lastExportAt ? new Date(state.appSettings.lastExportAt) : null;
+  const ageDays =
+    last && Number.isFinite(last.getTime()) ? Math.floor((Date.now() - last.getTime()) / 86400000) : Number.POSITIVE_INFINITY;
+  const shouldShow = changes >= 25 || (changes > 0 && ageDays >= 7);
+  banner.hidden = !shouldShow;
+}
+
+function persistBackupStateSoon() {
+  if (state.backupPersistTimer) return;
+  state.backupPersistTimer = setTimeout(async () => {
+    state.backupPersistTimer = null;
+    try {
+      await setSetting("backupChanges", state.appSettings.backupChanges || 0);
+      await setSetting("lastExportAt", state.appSettings.lastExportAt || "");
+    } catch {
+      // ignore
+    }
+  }, 700);
+}
+
+async function noteChange({ announceMsg = "" } = {}) {
+  state.appSettings.backupChanges = (state.appSettings.backupChanges || 0) + 1;
+  updateBackupBanner();
+  persistBackupStateSoon();
+
+  const every = state.appSettings.snapshotEvery || 10;
+  if (every > 0 && state.activeSprintId && state.appSettings.backupChanges % every === 0) {
+    try {
+      await recordActiveSprintSnapshot();
+    } catch {
+      // ignore
+    }
+  }
+
+  if (announceMsg) announce(announceMsg);
 }
 
 function setUndo(undo, { timeoutMs = 10000 } = {}) {
@@ -269,23 +556,28 @@ function groupOrderKeys(keys) {
 }
 
 function statusIndex(status) {
-  return Math.max(0, COLUMN_IDS.indexOf(status));
+  const order = orderedStatuses({ includeHidden: true });
+  return Math.max(0, order.indexOf(status));
 }
 
 function prevStatus(status) {
-  const idx = statusIndex(status);
-  return COLUMN_IDS[Math.max(0, idx - 1)];
+  const order = orderedStatuses({ includeHidden: true });
+  const idx = Math.max(0, order.indexOf(status));
+  return order[Math.max(0, idx - 1)] || order[0] || status;
 }
 
 function nextStatus(status) {
-  const idx = statusIndex(status);
-  return COLUMN_IDS[Math.min(COLUMN_IDS.length - 1, idx + 1)];
+  const order = orderedStatuses({ includeHidden: true });
+  const idx = Math.max(0, order.indexOf(status));
+  return order[Math.min(order.length - 1, idx + 1)] || order[order.length - 1] || status;
 }
 
 function normalizeTask(task) {
   const normalized = { ...task };
   if (!COLUMN_IDS.includes(normalized.status)) normalized.status = "todo";
   if (typeof normalized.order !== "number") normalized.order = 0;
+  normalized.points = Number.isFinite(Number(normalized.points)) ? Math.max(0, Math.floor(Number(normalized.points))) : 0;
+  normalized.rank = Number.isFinite(Number(normalized.rank)) ? Math.max(0, Math.floor(Number(normalized.rank))) : 0;
   normalized.title = (normalized.title || "").trim();
   normalized.description = normalized.description || "";
   normalized.priority = normalized.priority || "";
@@ -294,6 +586,7 @@ function normalizeTask(task) {
   normalized.epicId = normalized.epicId || "";
   normalized.sprintId = normalized.sprintId || "";
   normalized.backlogOnly = Boolean(normalized.backlogOnly);
+  normalized.carriedFromSprintId = normalized.carriedFromSprintId || "";
   normalized.dueDate = normalized.dueDate || "";
   normalized.labels = Array.isArray(normalized.labels) ? normalized.labels : parseLabels(normalized.labels);
   normalized.blocked = Boolean(normalized.blocked);
@@ -378,12 +671,14 @@ function renderBoardSelect() {
 }
 
 function renderColumns() {
+  destroySortables();
   const scrumView = document.getElementById("scrumView");
   const kanbanView = document.getElementById("kanbanView");
   if (state.viewMode === "scrum") {
     if (scrumView) scrumView.hidden = false;
     if (kanbanView) kanbanView.hidden = true;
     renderScrum();
+    setupSortables();
     return;
   }
   if (scrumView) scrumView.hidden = true;
@@ -392,9 +687,10 @@ function renderColumns() {
   const columnsRoot = el("columns");
   const tasks = filteredTasks();
   const counts = taskCounts(tasks);
+  const statuses = orderedStatuses({ includeHidden: false });
 
-  const columnsHtml = COLUMN_IDS.map((status) => {
-    const label = COLUMN_LABELS[status] || status;
+  const columnsHtml = statuses.map((status) => {
+    const label = statusLabel(status);
     const limit = wipLimitFor(status);
     const limitLabel = limit ? ` / ${limit}` : "";
     const policy = (state.activeBoard?.columnPolicies?.[status] || "").trim();
@@ -417,7 +713,7 @@ function renderColumns() {
       <section class="column" data-status="${escapeText(status)}" aria-label="${escapeText(label)} column">
         <div class="column-header">
           <div style="display:flex; gap:10px; align-items:center; min-width:0;">
-            <div class="column-title">${escapeText(label)}</div>
+            <div class="column-title" data-editable="1">${escapeText(label)}</div>
             <div class="count-pill" aria-label="Task count">${counts[status] || 0}${escapeText(
               limitLabel,
             )}</div>
@@ -434,21 +730,31 @@ function renderColumns() {
 
   columnsRoot.innerHTML = columnsHtml;
 
-  for (const status of COLUMN_IDS) {
+  columnsRoot.querySelectorAll(".column-title[data-editable='1']").forEach((titleEl) => {
+    titleEl.addEventListener("dblclick", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      startColumnTitleEdit(titleEl);
+    });
+  });
+
+  for (const status of statuses) {
     const list = columnsRoot.querySelector(`.task-list[data-status="${CSS.escape(status)}"]`);
     if (!list) continue;
-    list.addEventListener("dragover", onDragOver);
-    list.addEventListener("drop", onDrop);
-    list.addEventListener("dragenter", (e) => {
-      if (state.filter.groupBy !== "none" || state.bulk.enabled) return;
-      e.preventDefault();
-      list.style.outline = `2px dashed color-mix(in srgb, var(--accent) 55%, transparent)`;
-      list.style.outlineOffset = "4px";
-    });
-    list.addEventListener("dragleave", () => {
-      list.style.outline = "";
-      list.style.outlineOffset = "";
-    });
+    if (!isSortableEnabled()) {
+      list.addEventListener("dragover", onDragOver);
+      list.addEventListener("drop", onDrop);
+      list.addEventListener("dragenter", (e) => {
+        if (state.filter.groupBy !== "none" || state.bulk.enabled) return;
+        e.preventDefault();
+        list.style.outline = `2px dashed color-mix(in srgb, var(--accent) 55%, transparent)`;
+        list.style.outlineOffset = "4px";
+      });
+      list.addEventListener("dragleave", () => {
+        list.style.outline = "";
+        list.style.outlineOffset = "";
+      });
+    }
   }
 
   columnsRoot.querySelectorAll(".policy-btn").forEach((btn) => {
@@ -461,6 +767,7 @@ function renderColumns() {
   });
 
   renderTasks();
+  setupSortables();
 }
 
 function render() {
@@ -502,8 +809,13 @@ function renderScrumControls() {
   const meta = document.getElementById("activeSprintMeta");
   const selectedSprint = state.sprintsById.get(select?.value || "") || null;
   if (meta) {
-    if (active) meta.textContent = `${active.name} - ${formatSprintRange(active)}`;
-    else if (selectedSprint) meta.textContent = `${selectedSprint.name} (${selectedSprint.status}) - ${formatSprintRange(selectedSprint)}`;
+    if (active) {
+      meta.textContent = `${active.name} - ${formatSprintRange(active)}${active.goal ? ` - Goal: ${active.goal}` : ""}`;
+    } else if (selectedSprint) {
+      meta.textContent = `${selectedSprint.name} (${selectedSprint.status}) - ${formatSprintRange(selectedSprint)}${
+        selectedSprint.goal ? ` - Goal: ${selectedSprint.goal}` : ""
+      }`;
+    }
     else meta.textContent = "No active sprint";
   }
 
@@ -516,7 +828,7 @@ function renderScrumControls() {
   if (reportBtn) reportBtn.disabled = !selectedSprint;
 }
 
-function renderTaskRow(task, { actionLabel = null, action = null, actionSprintId = "" } = {}) {
+function renderTaskRow(task, { actionLabel = null, action = null, actionSprintId = "", context = "" } = {}) {
   const color = task.color || "#0052cc";
   const badges = [];
   if (task.assignee) badges.push(`<span class="badge">Assigned: ${escapeText(task.assignee)}</span>`);
@@ -525,6 +837,20 @@ function renderTaskRow(task, { actionLabel = null, action = null, actionSprintId
   }
   if (task.priority) badges.push(`<span class="badge ${escapeText(task.priority)}">${escapeText(task.priority)}</span>`);
   if (task.blocked) badges.push(`<span class="badge high">blocked</span>`);
+  if (task.points) badges.push(`<span class="badge">${escapeText(String(task.points))} pt</span>`);
+  if (task.dueDate) {
+    const dueIso = String(task.dueDate).slice(0, 10);
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const due = new Date(`${dueIso}T00:00:00.000Z`);
+    const diffDays = Math.round((due.getTime() - today.getTime()) / 86400000);
+    const cls = diffDays < 0 ? "high" : diffDays <= 2 ? "medium" : "";
+    badges.push(`<span class="badge ${cls}">Due: ${escapeText(dueIso)}</span>`);
+  }
+  if (task.carriedFromSprintId && state.sprintsById.has(task.carriedFromSprintId)) {
+    const s = state.sprintsById.get(task.carriedFromSprintId);
+    badges.push(`<span class="badge">Carried: ${escapeText(s?.name || "Sprint")}</span>`);
+  }
 
   const actionBtn =
     action && actionLabel
@@ -533,18 +859,34 @@ function renderTaskRow(task, { actionLabel = null, action = null, actionSprintId
         )}" data-sprint-id="${escapeText(actionSprintId)}">${escapeText(actionLabel)}</button>`
       : "";
 
+  let extra = "";
+  if (context === "backlog") {
+    const planned = state.sprints.filter((s) => s.status === "planned");
+    const opts = planned
+      .map((s) => `<option value="${escapeText(s.id)}">${escapeText(s.name || "Sprint")}</option>`)
+      .join("");
+    extra = `
+      <button class="mini-btn" type="button" data-action="rank-top" data-task-id="${escapeText(task.id)}">Top</button>
+      <button class="mini-btn" type="button" data-action="rank-bottom" data-task-id="${escapeText(task.id)}">Bottom</button>
+      <select class="select mini-select" data-action="move-to-sprint" data-task-id="${escapeText(task.id)}" aria-label="Move to sprint">
+        <option value="">Move to sprint...</option>
+        ${opts}
+      </select>
+    `;
+  }
+
   return `
-    <article class="task-card backlog" role="listitem" tabindex="0" draggable="true" data-task-id="${escapeText(
-      task.id,
-    )}">
-      <div class="task-actions">${actionBtn}</div>
+    <article class="task-card backlog" role="listitem" tabindex="0" draggable="${
+      isSortableEnabled() ? "false" : "true"
+    }" data-task-id="${escapeText(task.id)}">
+      <div class="task-actions">${actionBtn}${extra}</div>
       <div class="task-title">
         <span class="task-color" style="background:${escapeText(color)}" aria-hidden="true"></span>
         <span>${escapeText(task.title || "Untitled task")}</span>
       </div>
       <div class="task-meta">
         ${badges.join("")}
-        <span class="badge">${escapeText(COLUMN_LABELS[task.status] || task.status)}</span>
+        <span class="badge">${escapeText(statusLabel(task.status))}</span>
         <span class="badge">Updated: ${escapeText(shortDate(task.updatedAt))}</span>
       </div>
     </article>
@@ -567,9 +909,10 @@ function renderScrumSprintBoard() {
   const all = filteredTasks();
   const sprintTasks = viewing ? all.filter((t) => t.sprintId === viewing.id) : [];
   const counts = taskCounts(sprintTasks);
+  const statuses = orderedStatuses({ includeHidden: false });
 
-  root.innerHTML = COLUMN_IDS.map((status) => {
-    const label = COLUMN_LABELS[status] || status;
+  root.innerHTML = statuses.map((status) => {
+    const label = statusLabel(status);
     const limit = wipLimitFor(status);
     const limitLabel = limit ? ` / ${limit}` : "";
     const addButton =
@@ -586,7 +929,7 @@ function renderScrumSprintBoard() {
       <section class="column" data-status="${escapeText(status)}" aria-label="${escapeText(label)} column">
         <div class="column-header">
           <div style="display:flex; gap:10px; align-items:center; min-width:0;">
-            <div class="column-title">${escapeText(label)}</div>
+            <div class="column-title" data-editable="1">${escapeText(label)}</div>
             <div class="count-pill" aria-label="Task count">${counts[status] || 0}${escapeText(limitLabel)}</div>
           </div>
           ${addButton}
@@ -596,24 +939,34 @@ function renderScrumSprintBoard() {
     `;
   }).join("");
 
-  for (const status of COLUMN_IDS) {
+  root.querySelectorAll(".column-title[data-editable='1']").forEach((titleEl) => {
+    titleEl.addEventListener("dblclick", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      startColumnTitleEdit(titleEl);
+    });
+  });
+
+  for (const status of statuses) {
     const list = root.querySelector(`.task-list[data-status="${CSS.escape(status)}"]`);
     if (!list) continue;
-    list.addEventListener("dragover", onDragOver);
-    list.addEventListener("drop", onDrop);
-    list.addEventListener("dragenter", (e) => {
-      if (state.filter.groupBy !== "none" || state.bulk.enabled) return;
-      e.preventDefault();
-      list.style.outline = `2px dashed color-mix(in srgb, var(--accent) 55%, transparent)`;
-      list.style.outlineOffset = "4px";
-    });
-    list.addEventListener("dragleave", () => {
-      list.style.outline = "";
-      list.style.outlineOffset = "";
-    });
+    if (!isSortableEnabled()) {
+      list.addEventListener("dragover", onDragOver);
+      list.addEventListener("drop", onDrop);
+      list.addEventListener("dragenter", (e) => {
+        if (state.filter.groupBy !== "none" || state.bulk.enabled) return;
+        e.preventDefault();
+        list.style.outline = `2px dashed color-mix(in srgb, var(--accent) 55%, transparent)`;
+        list.style.outlineOffset = "4px";
+      });
+      list.addEventListener("dragleave", () => {
+        list.style.outline = "";
+        list.style.outlineOffset = "";
+      });
+    }
   }
 
-  for (const status of COLUMN_IDS) {
+  for (const status of statuses) {
     const list = root.querySelector(`.task-list[data-status="${CSS.escape(status)}"]`);
     if (!list) continue;
     list.innerHTML = sprintTasks.filter((t) => t.status === status).sort(byOrderThenDate).map(renderTaskCard).join("");
@@ -629,7 +982,7 @@ function renderScrumSprintBoard() {
       const id = card.dataset.taskId;
       const task = state.tasksById.get(id);
       if (!task) return;
-      openTaskModal({ mode: "edit", task });
+      openTaskModal({ mode: "edit", task, sourceEl: card });
     });
     card.addEventListener("keydown", (e) => onCardKeyDown(e, card));
     card.addEventListener("dragstart", onDragStart);
@@ -657,13 +1010,13 @@ function renderScrumBacklog() {
 
   const active = getActiveSprint();
   const all = filteredTasks();
-  const backlog = all.filter((t) => t.backlogOnly && !t.sprintId).sort(byOrderThenDate);
+  const backlog = all.filter((t) => t.backlogOnly && !t.sprintId).sort(byRankThenDate);
   const planned = state.sprints.filter((s) => s.status === "planned");
   const completed = state.sprints.filter((s) => s.status === "completed").slice().reverse();
 
   plannedRoot.innerHTML = planned
     .map((s) => {
-      const tasks = all.filter((t) => t.sprintId === s.id).sort(byOrderThenDate);
+      const tasks = all.filter((t) => t.sprintId === s.id).sort(byRankThenDate);
       const count = tasks.length;
       const startDisabled = Boolean(active);
       const actions = `
@@ -739,9 +1092,7 @@ function renderScrumBacklog() {
   backlogRoot.innerHTML = backlog
     .map((t) =>
       renderTaskRow(t, {
-        action: "add-to-sprint",
-        actionLabel: "Add",
-        actionSprintId: "",
+        context: "backlog",
       }),
     )
     .join("");
@@ -763,6 +1114,10 @@ function renderScrumBacklog() {
       await startSprint(sprintId);
     } else if (action === "delete-sprint") {
       await deletePlannedSprint(sprintId);
+    } else if (action === "rank-top") {
+      await moveBacklogRank(taskId, "top");
+    } else if (action === "rank-bottom") {
+      await moveBacklogRank(taskId, "bottom");
     } else if (action === "view-sprint") {
       const select = document.getElementById("activeSprintSelect");
       if (select) select.value = sprintId;
@@ -779,6 +1134,15 @@ function renderScrumBacklog() {
   plannedRoot.onclick = onClick;
   completedRoot.onclick = onClick;
   backlogRoot.onclick = onClick;
+  backlogRoot.onchange = async (e) => {
+    const sel = e.target.closest("select[data-action='move-to-sprint']");
+    if (!sel) return;
+    const sprintId = sel.value || "";
+    const taskId = sel.dataset.taskId || "";
+    sel.value = "";
+    if (!sprintId) return;
+    await addTaskToSprint(taskId, sprintId);
+  };
 
   // Open task modal on card click (not on button)
   plannedRoot.querySelectorAll(".task-card").forEach((card) => {
@@ -789,7 +1153,7 @@ function renderScrumBacklog() {
       if (e.target.closest("[data-action]")) return;
       const id = card.dataset.taskId;
       const task = state.tasksById.get(id);
-      if (task) openTaskModal({ mode: "edit", task });
+      if (task) openTaskModal({ mode: "edit", task, sourceEl: card });
     });
     card.addEventListener("keydown", (e) => onCardKeyDown(e, card));
     card.addEventListener("dragstart", onDragStart);
@@ -803,38 +1167,39 @@ function renderScrumBacklog() {
       if (e.target.closest("[data-action]")) return;
       const id = card.dataset.taskId;
       const task = state.tasksById.get(id);
-      if (task) openTaskModal({ mode: "edit", task });
+      if (task) openTaskModal({ mode: "edit", task, sourceEl: card });
     });
     card.addEventListener("keydown", (e) => onCardKeyDown(e, card));
     card.addEventListener("dragstart", onDragStart);
     card.addEventListener("dragend", onDragEnd);
   });
 
-  // Drop zones (scrum planning)
-  const zones = [backlogRoot].concat(
-    [...plannedRoot.querySelectorAll(".planned-body")].filter(Boolean),
-  );
-  zones.forEach((zone) => {
-    zone.addEventListener("dragover", onDragOver);
-    zone.addEventListener("drop", onDrop);
-    zone.addEventListener("dragenter", (e) => {
-      if (state.filter.groupBy !== "none" || state.bulk.enabled) return;
-      e.preventDefault();
-      zone.style.outline = `2px dashed color-mix(in srgb, var(--accent) 55%, transparent)`;
-      zone.style.outlineOffset = "4px";
+  if (!isSortableEnabled()) {
+    // Drop zones (scrum planning)
+    const zones = [backlogRoot].concat([...plannedRoot.querySelectorAll(".planned-body")].filter(Boolean));
+    zones.forEach((zone) => {
+      zone.addEventListener("dragover", onDragOver);
+      zone.addEventListener("drop", onDrop);
+      zone.addEventListener("dragenter", (e) => {
+        if (state.filter.groupBy !== "none" || state.bulk.enabled) return;
+        e.preventDefault();
+        zone.style.outline = `2px dashed color-mix(in srgb, var(--accent) 55%, transparent)`;
+        zone.style.outlineOffset = "4px";
+      });
+      zone.addEventListener("dragleave", () => {
+        zone.style.outline = "";
+        zone.style.outlineOffset = "";
+      });
     });
-    zone.addEventListener("dragleave", () => {
-      zone.style.outline = "";
-      zone.style.outlineOffset = "";
-    });
-  });
+  }
 }
 
 function renderTasks() {
   const root = el("columns");
   const tasks = filteredTasks();
   const groupBy = state.filter.groupBy;
-  for (const status of COLUMN_IDS) {
+  const statuses = orderedStatuses({ includeHidden: false });
+  for (const status of statuses) {
     const list = root.querySelector(`.task-list[data-status="${CSS.escape(status)}"]`);
     if (!list) continue;
     const columnTasks = tasks.filter((t) => t.status === status).sort(byOrderThenDate);
@@ -877,7 +1242,7 @@ function renderTasks() {
       const id = card.dataset.taskId;
       const task = state.tasksById.get(id);
       if (!task) return;
-      openTaskModal({ mode: "edit", task });
+      openTaskModal({ mode: "edit", task, sourceEl: card });
     });
 
     card.addEventListener("keydown", (e) => onCardKeyDown(e, card));
@@ -913,7 +1278,16 @@ function renderTasks() {
 function renderTaskCard(task) {
   const color = task.color || "#4f46e5";
   const priority = task.priority || "";
-  const due = task.dueDate ? `Due: ${String(task.dueDate).slice(0, 10)}` : "";
+  const dueDateIso = task.dueDate ? String(task.dueDate).slice(0, 10) : "";
+  let dueBadge = "";
+  if (dueDateIso) {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const due = new Date(`${dueDateIso}T00:00:00.000Z`);
+    const diffDays = Math.round((due.getTime() - today.getTime()) / 86400000);
+    const cls = diffDays < 0 ? "high" : diffDays <= 2 ? "medium" : "";
+    dueBadge = `<span class="badge ${cls}">Due: ${escapeText(dueDateIso)}</span>`;
+  }
   const labels = Array.isArray(task.labels) ? task.labels.slice(0, 2) : [];
 
   const badges = [];
@@ -921,11 +1295,16 @@ function renderTaskCard(task) {
     badges.push(`<span class="badge ${escapeText(priority)}">${escapeText(priority)}</span>`);
   }
   if (task.blocked) badges.push(`<span class="badge high">blocked</span>`);
+  if (task.points) badges.push(`<span class="badge">${escapeText(String(task.points))} pt</span>`);
   if (task.assignee) badges.push(`<span class="badge">Assigned: ${escapeText(task.assignee)}</span>`);
   if (task.epicId && state.epicsById.has(task.epicId)) {
     badges.push(`<span class="badge">Epic: ${escapeText(state.epicsById.get(task.epicId).name || "Epic")}</span>`);
   }
-  if (due) badges.push(`<span class="badge">${escapeText(due)}</span>`);
+  if (dueBadge) badges.push(dueBadge);
+  if (task.carriedFromSprintId && state.sprintsById.has(task.carriedFromSprintId)) {
+    const s = state.sprintsById.get(task.carriedFromSprintId);
+    badges.push(`<span class="badge">Carried: ${escapeText(s?.name || "Sprint")}</span>`);
+  }
   for (const l of labels) badges.push(`<span class="badge">${escapeText(l)}</span>`);
 
   const desc = (task.description || "").trim().replace(/\s+/g, " ");
@@ -937,7 +1316,10 @@ function renderTaskCard(task) {
   const bulkClass = state.bulk.enabled ? "bulk" : "";
   const selectedClass = state.bulk.selected.has(task.id) ? "selected" : "";
   const blockedClass = task.blocked ? "blocked" : "";
-  const draggable = state.filter.groupBy === "none" && !state.bulk.enabled ? 'draggable="true"' : 'draggable="false"';
+  const draggable =
+    !isSortableEnabled() && state.filter.groupBy === "none" && !state.bulk.enabled
+      ? 'draggable="true"'
+      : 'draggable="false"';
 
   return `
     <article class="task-card ${bulkClass} ${selectedClass} ${blockedClass}" role="listitem" tabindex="0" ${draggable} data-task-id="${escapeText(
@@ -1016,7 +1398,7 @@ async function moveTask(taskId, toStatus, { source = "move" } = {}) {
   if (!task || task.status === toStatus) return;
 
   if (!canPlaceInStatus(toStatus, { excludingTaskId: taskId })) {
-    showToast(`WIP limit reached for ${COLUMN_LABELS[toStatus]}.`, { kind: "error" });
+    showToast(`WIP limit reached for ${statusLabel(toStatus)}.`, { kind: "error" });
     return;
   }
 
@@ -1027,7 +1409,7 @@ async function moveTask(taskId, toStatus, { source = "move" } = {}) {
     status: toStatus,
     updatedAt: ts,
     order: nextOrderForStatus(toStatus),
-    doneAt: toStatus === "done" ? (task.doneAt || ts) : task.doneAt || "",
+    doneAt: isDoneStatus(toStatus) ? (task.doneAt || ts) : "",
   });
 
   try {
@@ -1037,7 +1419,9 @@ async function moveTask(taskId, toStatus, { source = "move" } = {}) {
     await logEvent("task_moved", { taskId, from: before.status, to: toStatus, source });
 
     setUndo({ type: "restore_tasks", tasks: [before] }, { timeoutMs: 12000 });
+    announce(`Moved "${updated.title || "task"}" to ${statusLabel(toStatus)}.`);
 
+    await noteChange();
     await recordActiveSprintSnapshot();
     renderColumns();
   } catch (err) {
@@ -1074,6 +1458,7 @@ async function reorderWithinStatus(taskId, direction) {
     await logEvent("task_reordered", { taskId: a.id, withTaskId: b.id, status: task.status });
 
     setUndo({ type: "restore_tasks", tasks: [a, b] }, { timeoutMs: 12000 });
+    announce("Reordered.");
     renderColumns();
   } catch (err) {
     showToast(err?.message || "Reorder failed.", { kind: "error" });
@@ -1093,7 +1478,7 @@ function onCardKeyDown(e, card) {
 
   if (e.key === "Enter") {
     e.preventDefault();
-    openTaskModal({ mode: "edit", task });
+    openTaskModal({ mode: "edit", task, sourceEl: card });
     return;
   }
 
@@ -1255,7 +1640,7 @@ async function persistTaskPositionsFromDOM(rootEl, { defaultSprintId = null } = 
             updatedAt: ts,
             sprintId: nextSprintId,
             backlogOnly: nextBacklogOnly,
-            doneAt: status === "done" ? (existing.doneAt || ts) : existing.doneAt || "",
+            doneAt: isDoneStatus(status) ? (existing.doneAt || ts) : "",
           }),
         );
       }
@@ -1272,6 +1657,8 @@ async function persistTaskPositionsFromDOM(rootEl, { defaultSprintId = null } = 
     await recordActiveSprintSnapshot();
 
     setUndo({ type: "restore_tasks", tasks: before }, { timeoutMs: 12000 });
+    announce("Updated.");
+    await noteChange();
   } catch (err) {
     showToast(err?.message || "Update failed.", { kind: "error" });
   }
@@ -1302,14 +1689,19 @@ async function persistScrumAssignmentsFromDOM() {
     plannedRoot.querySelectorAll("[data-sprint-id] .planned-body").forEach((body) => {
       const sprintId = body.closest("[data-sprint-id]")?.dataset?.sprintId || "";
       if (!sprintId) return;
-      body.querySelectorAll(".task-card").forEach((card) => {
+      body.querySelectorAll(".task-card").forEach((card, idx) => {
         const id = card.dataset.taskId;
         const existing = state.tasksById.get(id);
         if (!existing) return;
-        if ((existing.sprintId || "") !== sprintId || existing.backlogOnly) {
+        const nextRank = idx;
+        const needs =
+          (existing.sprintId || "") !== sprintId || existing.backlogOnly || (existing.rank || 0) !== nextRank;
+        if (needs) {
           const ts = nowISO();
-          updates.push(normalizeTask({ ...existing, sprintId, backlogOnly: false, updatedAt: ts }));
-          scopeChanges.push({ taskId: existing.id, fromSprintId: existing.sprintId || "", toSprintId: sprintId });
+          updates.push(normalizeTask({ ...existing, sprintId, backlogOnly: false, rank: nextRank, updatedAt: ts }));
+          if ((existing.sprintId || "") !== sprintId) {
+            scopeChanges.push({ taskId: existing.id, fromSprintId: existing.sprintId || "", toSprintId: sprintId });
+          }
         }
       });
     });
@@ -1317,14 +1709,18 @@ async function persistScrumAssignmentsFromDOM() {
 
   // 3) Persist backlog list (assignment only)
   if (backlogRoot) {
-    backlogRoot.querySelectorAll(".task-card").forEach((card) => {
+    backlogRoot.querySelectorAll(".task-card").forEach((card, idx) => {
       const id = card.dataset.taskId;
       const existing = state.tasksById.get(id);
       if (!existing) return;
-      if (existing.sprintId || !existing.backlogOnly) {
+      const nextRank = idx;
+      const needs = existing.sprintId || !existing.backlogOnly || (existing.rank || 0) !== nextRank;
+      if (needs) {
         const ts = nowISO();
-        updates.push(normalizeTask({ ...existing, sprintId: "", backlogOnly: true, updatedAt: ts }));
-        scopeChanges.push({ taskId: existing.id, fromSprintId: existing.sprintId || "", toSprintId: "" });
+        updates.push(normalizeTask({ ...existing, sprintId: "", backlogOnly: true, rank: nextRank, updatedAt: ts }));
+        if (existing.sprintId) {
+          scopeChanges.push({ taskId: existing.id, fromSprintId: existing.sprintId || "", toSprintId: "" });
+        }
       }
     });
   }
@@ -1370,7 +1766,31 @@ function trapFocus(modalEl) {
   return () => modalEl.removeEventListener("keydown", onKeyDown);
 }
 
-function openOverlayModal(modalId) {
+function focusFirstInModal(modalId) {
+  const modalEl = el(modalId);
+  if (!modalEl || modalEl.hidden) return;
+  const node = modalEl.querySelector(
+    'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
+  );
+  if (node && typeof node.focus === "function") node.focus();
+}
+
+function rememberReturnFocus(modalId, returnFocusEl) {
+  const target = returnFocusEl || document.activeElement;
+  if (target && typeof target.focus === "function") state.modal.returnFocusById[modalId] = target;
+}
+
+function restoreReturnFocus(modalId) {
+  const target = state.modal.returnFocusById[modalId];
+  delete state.modal.returnFocusById[modalId];
+  if (!target || typeof target.focus !== "function") return;
+  setTimeout(() => {
+    if (document.contains(target)) target.focus();
+  }, 0);
+}
+
+function openOverlayModal(modalId, { returnFocusEl = null } = {}) {
+  rememberReturnFocus(modalId, returnFocusEl);
   el("modalBackdrop").hidden = false;
   el(modalId).hidden = false;
   document.body.style.overflow = "hidden";
@@ -1394,11 +1814,13 @@ function closeOverlayModal(modalId, { force = false, confirmDirty = false } = {}
     !el("insightsModal").hidden ||
     !el("epicsModal").hidden ||
     !el("sprintModal").hidden ||
-    !el("sprintReportModal").hidden;
+    !el("sprintReportModal").hidden ||
+    !el("shortcutsModal").hidden;
   if (!anyOpen) {
     el("modalBackdrop").hidden = true;
     document.body.style.overflow = "";
     state.modal.openId = null;
+    restoreReturnFocus(modalId);
   } else if (state.modal.openId === modalId) {
     state.modal.openId = !el("taskModal").hidden
       ? "taskModal"
@@ -1412,13 +1834,16 @@ function closeOverlayModal(modalId, { force = false, confirmDirty = false } = {}
               ? "sprintModal"
               : !el("sprintReportModal").hidden
                 ? "sprintReportModal"
+                : !el("shortcutsModal").hidden
+                  ? "shortcutsModal"
             : null;
+    focusFirstInModal(state.modal.openId);
   }
   return true;
 }
 
-function openModal() {
-  openOverlayModal("taskModal");
+function openModal({ returnFocusEl = null } = {}) {
+  openOverlayModal("taskModal", { returnFocusEl });
 }
 
 function closeModal({ force = false } = {}) {
@@ -1429,13 +1854,17 @@ function closeModal({ force = false } = {}) {
   state.modal.preview = false;
   const preview = document.getElementById("mdPreview");
   if (preview) preview.hidden = true;
+  const split = document.getElementById("mdSplit");
+  if (split) split.classList.remove("is-split");
   const toggle = document.getElementById("togglePreviewBtn");
-  if (toggle) toggle.textContent = "Preview";
+  if (toggle) toggle.textContent = "Split preview";
 }
 
 function fillStatusOptions(selectEl) {
-  selectEl.innerHTML = COLUMN_IDS.map(
-    (s) => `<option value="${escapeText(s)}">${escapeText(COLUMN_LABELS[s] || s)}</option>`,
+  const visibility = state.activeBoard?.columnVisibility || {};
+  selectEl.innerHTML = orderedStatuses({ includeHidden: true }).map(
+    (s) =>
+      `<option value="${escapeText(s)}">${escapeText(statusLabel(s))}${visibility[s] === false ? " (hidden)" : ""}</option>`,
   ).join("");
 }
 
@@ -1600,13 +2029,25 @@ function renderMarkdown(md) {
   return `<p>${joined}</p>`;
 }
 
-function openTaskModal({ mode, task, initialStatus, initialSprintId, initialBacklogOnly } = {}) {
+function syncMarkdownSplit() {
+  const preview = document.getElementById("mdPreview");
+  const split = document.getElementById("mdSplit");
+  if (!preview || !split) return;
+  preview.hidden = !state.modal.preview;
+  split.classList.toggle("is-split", state.modal.preview);
+  if (state.modal.preview) preview.innerHTML = renderMarkdown(el("taskDescription").value || "");
+  const btn = document.getElementById("togglePreviewBtn");
+  if (btn) btn.textContent = state.modal.preview ? "Hide preview" : "Split preview";
+}
+
+function openTaskModal({ mode, task, initialStatus, initialSprintId, initialBacklogOnly, sourceEl } = {}) {
   const idInput = el("taskId");
   const backlogOnlyInput = document.getElementById("taskBacklogOnly");
   const titleInput = el("taskTitle");
   const descInput = el("taskDescription");
   const statusSelect = el("taskStatus");
   const prioritySelect = el("taskPriority");
+  const pointsInput = document.getElementById("taskPoints");
   const colorInput = el("taskColor");
   const deleteBtn = el("deleteTaskBtn");
   const dates = el("taskDates");
@@ -1617,6 +2058,13 @@ function openTaskModal({ mode, task, initialStatus, initialSprintId, initialBack
   const duplicateBtn = document.getElementById("duplicateTaskBtn");
   const epicSelect = document.getElementById("taskEpic");
   const sprintSelect = document.getElementById("taskSprint");
+
+  const assigneesDatalist = document.getElementById("assigneesDatalist");
+  if (assigneesDatalist) {
+    assigneesDatalist.innerHTML = (state.activeBoard?.assignees || [])
+      .map((n) => `<option value="${escapeText(n)}"></option>`)
+      .join("");
+  }
 
   fillStatusOptions(statusSelect);
   fillEpicOptions(epicSelect, task?.epicId || "");
@@ -1630,6 +2078,7 @@ function openTaskModal({ mode, task, initialStatus, initialSprintId, initialBack
     descInput.value = task.description || "";
     statusSelect.value = task.status || "todo";
     prioritySelect.value = task.priority || "";
+    if (pointsInput) pointsInput.value = String(task.points || 0);
     colorInput.value = task.color || "#4f46e5";
     if (assignee) assignee.value = task.assignee || "";
     if (due) due.value = task.dueDate ? String(task.dueDate).slice(0, 10) : "";
@@ -1650,6 +2099,7 @@ function openTaskModal({ mode, task, initialStatus, initialSprintId, initialBack
     descInput.value = "";
     statusSelect.value = initialStatus || "todo";
     prioritySelect.value = "";
+    if (pointsInput) pointsInput.value = "0";
     colorInput.value = "#4f46e5";
     if (assignee) assignee.value = "";
     if (due) due.value = "";
@@ -1668,10 +2118,12 @@ function openTaskModal({ mode, task, initialStatus, initialSprintId, initialBack
   state.modal.preview = false;
   const preview = document.getElementById("mdPreview");
   if (preview) preview.hidden = true;
+  const split = document.getElementById("mdSplit");
+  if (split) split.classList.remove("is-split");
   const toggle = document.getElementById("togglePreviewBtn");
-  if (toggle) toggle.textContent = "Preview";
+  if (toggle) toggle.textContent = "Split preview";
 
-  openModal();
+  openModal({ returnFocusEl: sourceEl || null });
   titleInput.focus();
 }
 
@@ -1692,6 +2144,7 @@ async function onSaveTask(e) {
   const description = el("taskDescription").value || "";
   let status = el("taskStatus").value;
   const priority = el("taskPriority").value || "";
+  const points = Math.max(0, Math.floor(Number(document.getElementById("taskPoints")?.value || 0) || 0));
   const color = el("taskColor").value || "";
   const assignee = (document.getElementById("taskAssignee")?.value || "").trim();
   const dueRaw = document.getElementById("taskDueDate")?.value || "";
@@ -1718,11 +2171,11 @@ async function onSaveTask(e) {
   statusChanged = existing && existing.status !== status;
 
   if (!canPlaceInStatus(status, { excludingTaskId: existing?.id || null })) {
-    showToast(`WIP limit reached for ${COLUMN_LABELS[status]}.`, { kind: "error" });
+    showToast(`WIP limit reached for ${statusLabel(status)}.`, { kind: "error" });
     return;
   }
 
-  const doneAt = status === "done" ? existing?.doneAt || timestamp : existing?.doneAt || "";
+  const doneAt = isDoneStatus(status) ? existing?.doneAt || timestamp : "";
   if (state.viewMode === "scrum" && !sprintId) backlogOnly = true;
   if (sprintId) backlogOnly = false;
 
@@ -1733,6 +2186,7 @@ async function onSaveTask(e) {
     description,
     status,
     priority,
+    points,
     color,
     assignee,
     epicId,
@@ -1772,6 +2226,17 @@ async function onSaveTask(e) {
     // Success toasts removed (avoid distractions)
     await recordActiveSprintSnapshot();
     renderColumns();
+    await noteChange();
+
+    // Update assignee suggestions (best effort)
+    if (assignee) {
+      const existing = state.activeBoard?.assignees || [];
+      if (!existing.includes(assignee)) {
+        updateBoardSettings(state.activeBoardId, { assignees: [...existing, assignee].slice(0, 50) })
+          .then(() => loadBoardsAndActive())
+          .catch(() => {});
+      }
+    }
   } catch (err) {
     showToast(err?.message || "Save failed.", { kind: "error" });
   }
@@ -1791,6 +2256,7 @@ async function onDeleteTask() {
     await logEvent("task_deleted", { taskId: id, from: task.status });
 
     setUndo({ type: "restore_tasks", tasks: [{ ...task }] }, { timeoutMs: 12000 });
+    await noteChange();
 
     state.modal.dirty = false;
     closeModal({ force: true });
@@ -1807,7 +2273,7 @@ async function onDuplicateTask() {
   if (!task) return;
 
   if (!canPlaceInStatus("todo")) {
-    showToast(`WIP limit reached for ${COLUMN_LABELS.todo}.`, { kind: "error" });
+    showToast(`WIP limit reached for ${statusLabel("todo")}.`, { kind: "error" });
     return;
   }
 
@@ -1875,7 +2341,7 @@ async function onQuickAdd() {
     return;
   }
   if (!canPlaceInStatus("todo")) {
-    showToast(`WIP limit reached for ${COLUMN_LABELS.todo}.`, { kind: "error" });
+    showToast(`WIP limit reached for ${statusLabel("todo")}.`, { kind: "error" });
     return;
   }
 
@@ -1956,6 +2422,15 @@ async function onExportBoard() {
   };
   downloadJson(`${board.name.replace(/[^\w.-]+/g, "_")}.json`, payload);
   // Success toasts removed (avoid distractions)
+  state.appSettings.lastExportAt = nowISO();
+  state.appSettings.backupChanges = 0;
+  updateBackupBanner();
+  try {
+    await setSetting("backupChanges", 0);
+    await setSetting("lastExportAt", state.appSettings.lastExportAt);
+  } catch {
+    // ignore
+  }
 }
 
 async function onImportFile(file) {
@@ -2014,10 +2489,49 @@ function openSettingsModal() {
   const groupBy = document.getElementById("settingsGroupBy");
   if (groupBy) groupBy.value = board.groupBy || "none";
 
+  const columnManager = document.getElementById("columnManager");
+  if (columnManager) {
+    const vis = board.columnVisibility || {};
+    const doneSet = new Set(board.doneStatuses || ["done"]);
+    columnManager.innerHTML = orderedStatuses({ includeHidden: true })
+      .map((status) => {
+        const label = statusLabel(status);
+        const checked = vis[status] !== false ? "checked" : "";
+        const doneChecked = doneSet.has(status) ? "checked" : "";
+        return `
+          <div class="list-item" data-col-status="${escapeText(status)}">
+            <div class="list-item-left" style="min-width:0;">
+              <div class="list-item-text">${escapeText(label)}</div>
+              <div class="muted" style="font-size:12px;">${escapeText(status)}</div>
+            </div>
+            <div class="inline" style="gap:10px; flex-wrap:wrap; justify-content:flex-end;">
+              <label class="inline" style="gap:6px; font-size:12px;">
+                <input type="checkbox" data-col-visible ${checked} />
+                <span class="muted">Visible</span>
+              </label>
+              <label class="inline" style="gap:6px; font-size:12px;">
+                <input type="checkbox" data-col-done ${doneChecked} />
+                <span class="muted">Done</span>
+              </label>
+              <button class="btn btn-icon" type="button" data-col-move="up" aria-label="Move up">^</button>
+              <button class="btn btn-icon" type="button" data-col-move="down" aria-label="Move down">v</button>
+            </div>
+          </div>
+        `;
+      })
+      .join("");
+  }
+
+  const assigneesInput = document.getElementById("assigneesInput");
+  if (assigneesInput) assigneesInput.value = (board.assignees || []).join(", ");
+
+  const settingsVersion = document.getElementById("settingsVersion");
+  if (settingsVersion) settingsVersion.textContent = `v${APP_VERSION}`;
+
   const wipGrid = document.getElementById("wipGrid");
   if (wipGrid) {
     wipGrid.innerHTML = COLUMN_IDS.map((c) => {
-      const label = COLUMN_LABELS[c] || c;
+      const label = (board.columnNames?.[c] || "").trim() || COLUMN_LABELS[c] || c;
       const v = board.wipLimits?.[c];
       return `
         <div class="grid-row">
@@ -2033,7 +2547,7 @@ function openSettingsModal() {
   const policyGrid = document.getElementById("policyGrid");
   if (policyGrid) {
     policyGrid.innerHTML = COLUMN_IDS.map((c) => {
-      const label = COLUMN_LABELS[c] || c;
+      const label = (board.columnNames?.[c] || "").trim() || COLUMN_LABELS[c] || c;
       const v = (board.columnPolicies?.[c] || "").trim();
       return `
         <div class="grid-row">
@@ -2060,10 +2574,45 @@ async function onSaveSettings(e) {
   document.querySelectorAll("#policyGrid [data-policy]").forEach((ta) => {
     columnPolicies[ta.dataset.policy] = ta.value || "";
   });
+
+  const columns = [];
+  const columnVisibility = {};
+  const doneStatuses = [];
+  document.querySelectorAll("#columnManager [data-col-status]").forEach((row) => {
+    const status = row.dataset.colStatus;
+    if (!COLUMN_IDS.includes(status)) return;
+    columns.push(status);
+    const vis = row.querySelector("[data-col-visible]")?.checked;
+    columnVisibility[status] = Boolean(vis);
+    const done = row.querySelector("[data-col-done]")?.checked;
+    if (done) doneStatuses.push(status);
+  });
+  // Ensure we always have all columns
+  for (const c of COLUMN_IDS) if (!columns.includes(c)) columns.push(c);
+  if (!doneStatuses.length) doneStatuses.push("done");
+  const visibleCount = Object.values(columnVisibility).filter(Boolean).length;
+  if (visibleCount === 0) {
+    for (const c of COLUMN_IDS) columnVisibility[c] = true;
+  }
+
+  const assigneesInput = document.getElementById("assigneesInput")?.value || "";
+  const assignees = assigneesInput
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .slice(0, 50);
   const groupBy = document.getElementById("settingsGroupBy")?.value || "none";
 
   try {
-    await updateBoardSettings(state.activeBoardId, { wipLimits, columnPolicies, groupBy });
+    await updateBoardSettings(state.activeBoardId, {
+      wipLimits,
+      columnPolicies,
+      columns,
+      columnVisibility,
+      doneStatuses,
+      assignees,
+      groupBy,
+    });
     await logEvent("board_settings", { groupBy });
     closeOverlayModal("settingsModal", { force: true });
     await reloadAndRerender();
@@ -2123,7 +2672,7 @@ function formatDuration(ms) {
 
 async function openInsightsModal() {
   const tasks = state.tasks;
-  const done = tasks.filter((t) => t.status === "done" && t.doneAt && t.createdAt);
+  const done = tasks.filter((t) => isDoneStatus(t.status) && t.doneAt && t.createdAt);
   const cycleMs = done
     .map((t) => new Date(t.doneAt).getTime() - new Date(t.createdAt).getTime())
     .filter((n) => Number.isFinite(n) && n >= 0)
@@ -2295,13 +2844,14 @@ function todayDate() {
   return new Date().toISOString().slice(0, 10);
 }
 
-async function createSprint({ name, startDate, endDate }) {
+async function createSprint({ name, goal, startDate, endDate }) {
   const trimmed = String(name || "").trim();
   if (!trimmed) return null;
   const sprint = {
     id: makeId(),
     boardId: state.activeBoardId,
     name: trimmed,
+    goal: (String(goal || "").trim() || "").slice(0, 140),
     status: "planned",
     startDate: startDate || "",
     endDate: endDate || "",
@@ -2323,8 +2873,8 @@ async function recordActiveSprintSnapshot() {
   if (!active) return;
   const date = todayDate();
   const sprintTasks = state.tasks.filter((t) => t.sprintId === active.id);
-  const remaining = sprintTasks.filter((t) => t.status !== "done").length;
-  const done = sprintTasks.filter((t) => t.status === "done").length;
+  const remaining = sprintTasks.filter((t) => !isDoneStatus(t.status)).length;
+  const done = sprintTasks.filter((t) => isDoneStatus(t.status)).length;
   const total = sprintTasks.length;
   await upsertSprintSnapshot({
     id: `${active.id}_${date}`,
@@ -2387,8 +2937,16 @@ async function completeActiveSprint() {
 
   const movedOut = moveToBacklog
     ? state.tasks
-        .filter((t) => t.sprintId === active.id && t.status !== "done")
-        .map((t) => normalizeTask({ ...t, sprintId: "", backlogOnly: true, updatedAt: completedAt }))
+        .filter((t) => t.sprintId === active.id && !isDoneStatus(t.status))
+        .map((t) =>
+          normalizeTask({
+            ...t,
+            sprintId: "",
+            backlogOnly: true,
+            carriedFromSprintId: active.id,
+            updatedAt: completedAt,
+          }),
+        )
     : [];
 
   await saveSprint(updatedSprint);
@@ -2454,7 +3012,8 @@ async function addTaskToSprint(taskId, sprintId) {
     return;
   }
   const ts = nowISO();
-  const updated = normalizeTask({ ...task, sprintId: sprint.id, backlogOnly: false, updatedAt: ts });
+  const nextRank = state.tasks.filter((t) => t.sprintId === sprint.id).length;
+  const updated = normalizeTask({ ...task, sprintId: sprint.id, backlogOnly: false, rank: nextRank, updatedAt: ts });
   try {
     await saveTask(updated);
     await noteSprintScopeChange({ fromSprintId: task.sprintId || "", toSprintId: sprint.id, taskId });
@@ -2462,6 +3021,8 @@ async function addTaskToSprint(taskId, sprintId) {
     state.tasks = [...state.tasksById.values()].sort(byOrderThenDate);
     await logEvent("task_sprint_changed", { taskId, from: task.sprintId || "", to: sprint.id });
     await recordActiveSprintSnapshot();
+    announce(`Moved to sprint "${sprint.name || "Sprint"}".`);
+    await noteChange();
     render();
   } catch (err) {
     showToast(err?.message || "Failed to add to sprint.", { kind: "error" });
@@ -2472,7 +3033,8 @@ async function removeTaskFromSprint(taskId) {
   const task = state.tasksById.get(taskId);
   if (!task) return;
   const ts = nowISO();
-  const updated = normalizeTask({ ...task, sprintId: "", backlogOnly: true, updatedAt: ts });
+  const nextRank = state.tasks.filter((t) => t.backlogOnly && !t.sprintId).length;
+  const updated = normalizeTask({ ...task, sprintId: "", backlogOnly: true, rank: nextRank, updatedAt: ts });
   try {
     await saveTask(updated);
     await noteSprintScopeChange({ fromSprintId: task.sprintId || "", toSprintId: "", taskId });
@@ -2480,6 +3042,8 @@ async function removeTaskFromSprint(taskId) {
     state.tasks = [...state.tasksById.values()].sort(byOrderThenDate);
     await logEvent("task_sprint_changed", { taskId, from: task.sprintId || "", to: "" });
     await recordActiveSprintSnapshot();
+    announce("Moved to backlog.");
+    await noteChange();
     render();
   } catch (err) {
     showToast(err?.message || "Failed to remove from sprint.", { kind: "error" });
@@ -2493,7 +3057,7 @@ function sprintDisplayName(sprint) {
 }
 
 function isTaskDone(task) {
-  return task && task.status === "done";
+  return task && isDoneStatus(task.status);
 }
 
 function unique(list) {
@@ -2527,8 +3091,29 @@ async function renderSprintReport(sprintId) {
   const addedDone = added.filter((id) => isTaskDone(state.tasksById.get(id))).length;
 
   const sprintTasksNow = state.tasks.filter((t) => t.sprintId === sprint.id);
-  const doneNow = sprintTasksNow.filter((t) => t.status === "done").length;
-  const remainingNow = sprintTasksNow.filter((t) => t.status !== "done").length;
+  const doneNow = sprintTasksNow.filter((t) => isDoneStatus(t.status)).length;
+  const remainingNow = sprintTasksNow.filter((t) => !isDoneStatus(t.status)).length;
+
+  const pointsForId = (id) => Math.max(0, Math.floor(Number(state.tasksById.get(id)?.points || 0) || 0));
+  const pointsForTask = (t) => Math.max(0, Math.floor(Number(t?.points || 0) || 0));
+  const sum = (nums) => nums.reduce((a, b) => a + b, 0);
+
+  const committedPts = sum(committed.map(pointsForId));
+  const committedDonePts = sum(committed.filter((id) => isTaskDone(state.tasksById.get(id))).map(pointsForId));
+  const addedPts = sum(added.map(pointsForId));
+  const addedDonePts = sum(added.filter((id) => isTaskDone(state.tasksById.get(id))).map(pointsForId));
+  const donePtsNow = sum(sprintTasksNow.filter((t) => isDoneStatus(t.status)).map(pointsForTask));
+  const remainingPtsNow = sum(sprintTasksNow.filter((t) => !isDoneStatus(t.status)).map(pointsForTask));
+
+  const carried = state.tasks.filter((t) => t.carriedFromSprintId === sprint.id);
+  const carriedCount = carried.length;
+
+  const completedSprints = state.sprints.filter((s) => s.status === "completed");
+  const lastFive = completedSprints.slice(-5);
+  const velocities = lastFive.map((s) =>
+    sum(state.tasks.filter((t) => t.sprintId === s.id && isDoneStatus(t.status)).map(pointsForTask)),
+  );
+  const avgVelocity = velocities.length ? Math.round(sum(velocities) / velocities.length) : 0;
 
   const snapshots = await getSprintSnapshots(sprint.id);
   const snapRows =
@@ -2555,6 +3140,7 @@ async function renderSprintReport(sprintId) {
         <div class="list-item"><div class="list-item-left"><div class="list-item-text">${escapeText(
           sprintDisplayName(sprint),
         )}</div></div><div class="muted">${escapeText(formatSprintRange(sprint))}</div></div>
+        ${sprint.goal ? `<div class="list-item"><div class="list-item-left"><div class="list-item-text">Goal</div></div><div class="muted">${escapeText(sprint.goal)}</div></div>` : ""}
       </div>
     </div>
     <div class="section">
@@ -2562,10 +3148,15 @@ async function renderSprintReport(sprintId) {
       <div class="list">
         <div class="list-item"><div class="list-item-left"><div class="list-item-text">Committed at start</div></div><div class="muted">${committed.length}</div></div>
         <div class="list-item"><div class="list-item-left"><div class="list-item-text">Committed completed</div></div><div class="muted">${committedDone}</div></div>
+        <div class="list-item"><div class="list-item-left"><div class="list-item-text">Committed points</div></div><div class="muted">${committedPts} (done ${committedDonePts})</div></div>
         <div class="list-item"><div class="list-item-left"><div class="list-item-text">Added during sprint</div></div><div class="muted">${added.length}</div></div>
         <div class="list-item"><div class="list-item-left"><div class="list-item-text">Added completed</div></div><div class="muted">${addedDone}</div></div>
+        <div class="list-item"><div class="list-item-left"><div class="list-item-text">Added points</div></div><div class="muted">${addedPts} (done ${addedDonePts})</div></div>
         <div class="list-item"><div class="list-item-left"><div class="list-item-text">Removed from sprint</div></div><div class="muted">${removed.length}</div></div>
         <div class="list-item"><div class="list-item-left"><div class="list-item-text">Now in sprint</div></div><div class="muted">${sprintTasksNow.length} (done ${doneNow}, remaining ${remainingNow})</div></div>
+        <div class="list-item"><div class="list-item-left"><div class="list-item-text">Now points</div></div><div class="muted">${donePtsNow} done / ${remainingPtsNow} remaining</div></div>
+        <div class="list-item"><div class="list-item-left"><div class="list-item-text">Carried over</div></div><div class="muted">${carriedCount}</div></div>
+        <div class="list-item"><div class="list-item-left"><div class="list-item-text">Velocity (avg last 5)</div></div><div class="muted">${avgVelocity} pt</div></div>
       </div>
     </div>
     <div class="section">
@@ -2587,7 +3178,7 @@ async function onBulkMove() {
   if (limit) {
     const count = state.tasks.filter((t) => t.status === target && !exclude.has(t.id)).length;
     if (count + selected.length > limit) {
-      showToast(`WIP limit reached for ${COLUMN_LABELS[target]}.`, { kind: "error" });
+      showToast(`WIP limit reached for ${statusLabel(target)}.`, { kind: "error" });
       return;
     }
   }
@@ -2600,7 +3191,7 @@ async function onBulkMove() {
       status: target,
       order: nextOrderForStatus(target) + idx,
       updatedAt: ts,
-      doneAt: target === "done" ? (t.doneAt || ts) : t.doneAt || "",
+      doneAt: isDoneStatus(target) ? (t.doneAt || ts) : "",
     }),
   );
 
@@ -2610,6 +3201,7 @@ async function onBulkMove() {
     state.tasks = [...state.tasksById.values()].sort(byOrderThenDate);
     await logEvent("bulk_move", { count: updates.length, to: target });
     setUndo({ type: "restore_tasks", tasks: before }, { timeoutMs: 12000 });
+    await noteChange();
     state.bulk.selected.clear();
     renderBulkBar();
     renderColumns();
@@ -2629,6 +3221,7 @@ async function onBulkDelete() {
     state.tasks = [...state.tasksById.values()].sort(byOrderThenDate);
     await logEvent("bulk_delete", { count: selected.length });
     setUndo({ type: "restore_tasks", tasks: before }, { timeoutMs: 12000 });
+    await noteChange();
     state.bulk.selected.clear();
     renderBulkBar();
     renderColumns();
@@ -2729,9 +3322,11 @@ function wireEvents() {
   document.getElementById("epicsBtn")?.addEventListener("click", openEpicsModal);
   document.getElementById("newSprintBtn")?.addEventListener("click", () => {
     const name = document.getElementById("sprintName");
+    const goal = document.getElementById("sprintGoal");
     const sd = document.getElementById("sprintStartDate");
     const ed = document.getElementById("sprintEndDate");
     if (name) name.value = `Sprint ${todayDate()}`;
+    if (goal) goal.value = "";
     if (sd) sd.value = "";
     if (ed) ed.value = "";
     openOverlayModal("sprintModal");
@@ -2740,9 +3335,10 @@ function wireEvents() {
   document.getElementById("sprintForm")?.addEventListener("submit", async (e) => {
     e.preventDefault();
     const name = document.getElementById("sprintName")?.value || "";
+    const goal = document.getElementById("sprintGoal")?.value || "";
     const startDate = document.getElementById("sprintStartDate")?.value || "";
     const endDate = document.getElementById("sprintEndDate")?.value || "";
-    const sprint = await createSprint({ name, startDate, endDate });
+    const sprint = await createSprint({ name, goal, startDate, endDate });
     if (!sprint) return;
     closeOverlayModal("sprintModal", { force: true });
     await reloadAndRerender();
@@ -2760,8 +3356,14 @@ function wireEvents() {
   });
   document.getElementById("completeSprintBtn")?.addEventListener("click", completeActiveSprint);
   document.getElementById("sprintReportBtn")?.addEventListener("click", () => openSprintReportModal());
-  document.getElementById("newBacklogIssueBtn")?.addEventListener("click", () =>
-    openTaskModal({ mode: "new", initialStatus: "todo", initialSprintId: "", initialBacklogOnly: true }),
+  document.getElementById("newBacklogIssueBtn")?.addEventListener("click", (e) =>
+    openTaskModal({
+      mode: "new",
+      initialStatus: "todo",
+      initialSprintId: "",
+      initialBacklogOnly: true,
+      sourceEl: e.currentTarget,
+    }),
   );
   document.getElementById("closeSprintReportBtn")?.addEventListener("click", () =>
     closeOverlayModal("sprintReportModal", { force: true }),
@@ -2773,6 +3375,35 @@ function wireEvents() {
 
   document.getElementById("closeSettingsBtn")?.addEventListener("click", () => closeOverlayModal("settingsModal", { force: true }));
   document.getElementById("settingsForm")?.addEventListener("submit", onSaveSettings);
+  document.getElementById("columnManager")?.addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-col-move]");
+    if (!btn) return;
+    const dir = btn.dataset.colMove;
+    const row = btn.closest("[data-col-status]");
+    if (!row) return;
+    if (dir === "up") {
+      const prev = row.previousElementSibling;
+      if (prev) prev.before(row);
+    } else if (dir === "down") {
+      const next = row.nextElementSibling;
+      if (next) next.after(row);
+    }
+  });
+  document.getElementById("clearCacheBtn")?.addEventListener("click", async () => {
+    if (!confirm("Reset offline cache and reload?")) return;
+    try {
+      if ("serviceWorker" in navigator) {
+        const regs = await navigator.serviceWorker.getRegistrations();
+        await Promise.all(regs.map((r) => r.unregister()));
+      }
+      if ("caches" in window) {
+        const keys = await caches.keys();
+        await Promise.all(keys.map((k) => caches.delete(k)));
+      }
+    } finally {
+      location.reload();
+    }
+  });
   document.getElementById("closeInsightsBtn")?.addEventListener("click", () => closeOverlayModal("insightsModal", { force: true }));
   document.getElementById("closeEpicsBtn")?.addEventListener("click", () => closeOverlayModal("epicsModal", { force: true }));
 
@@ -2791,6 +3422,11 @@ function wireEvents() {
     if (state.swRegistration?.waiting) state.swRegistration.waiting.postMessage({ type: "SKIP_WAITING" });
     else location.reload();
   });
+  document.getElementById("backupExportBtn")?.addEventListener("click", onExportBoard);
+
+  document.getElementById("closeShortcutsBtn")?.addEventListener("click", () =>
+    closeOverlayModal("shortcutsModal", { force: true }),
+  );
 
   document.getElementById("undoBtn")?.addEventListener("click", () => undoLast());
 
@@ -2802,6 +3438,7 @@ function wireEvents() {
     else if (!el("epicsModal").hidden) closeOverlayModal("epicsModal", { force: true });
     else if (!el("sprintModal").hidden) closeOverlayModal("sprintModal", { force: true });
     else if (!el("sprintReportModal").hidden) closeOverlayModal("sprintReportModal", { force: true });
+    else if (!el("shortcutsModal").hidden) closeOverlayModal("shortcutsModal", { force: true });
   });
   el("taskForm").addEventListener("submit", onSaveTask);
   el("deleteTaskBtn").addEventListener("click", onDeleteTask);
@@ -2822,17 +3459,11 @@ function wireEvents() {
 
   document.getElementById("togglePreviewBtn")?.addEventListener("click", () => {
     state.modal.preview = !state.modal.preview;
-    const preview = document.getElementById("mdPreview");
-    if (!preview) return;
-    preview.hidden = !state.modal.preview;
-    const btn = document.getElementById("togglePreviewBtn");
-    if (btn) btn.textContent = state.modal.preview ? "Edit" : "Preview";
-    if (state.modal.preview) preview.innerHTML = renderMarkdown(el("taskDescription").value || "");
+    syncMarkdownSplit();
   });
   el("taskDescription").addEventListener("input", () => {
     if (!state.modal.preview) return;
-    const preview = document.getElementById("mdPreview");
-    if (preview) preview.innerHTML = renderMarkdown(el("taskDescription").value || "");
+    syncMarkdownSplit();
   });
 
   document.getElementById("checklistAddBtn")?.addEventListener("click", () => {
@@ -2867,6 +3498,7 @@ function wireEvents() {
     "taskDescription",
     "taskStatus",
     "taskPriority",
+    "taskPoints",
     "taskColor",
     "taskAssignee",
     "taskDueDate",
@@ -2889,6 +3521,13 @@ function wireEvents() {
     else if (!el("epicsModal").hidden) closeOverlayModal("epicsModal", { force: true });
     else if (!el("sprintModal").hidden) closeOverlayModal("sprintModal", { force: true });
     else if (!el("sprintReportModal").hidden) closeOverlayModal("sprintReportModal", { force: true });
+    else if (!el("shortcutsModal").hidden) closeOverlayModal("shortcutsModal", { force: true });
+  });
+
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "?") return;
+    if (state.modal.openId) return;
+    openOverlayModal("shortcutsModal");
   });
 
   document.addEventListener("keydown", (e) => {
@@ -2909,6 +3548,7 @@ function wireEvents() {
       mode: "new",
       initialStatus: btn.dataset.status,
       initialSprintId: btn.dataset.sprintId || "",
+      sourceEl: btn,
     });
   };
   el("columns").addEventListener("click", onAddClick);
@@ -2966,6 +3606,8 @@ async function main() {
   await loadSprints();
   wireEvents();
   renderBoardSelect();
+  const version = document.getElementById("versionPill");
+  if (version) version.textContent = `v${APP_VERSION}`;
   const groupBy = document.getElementById("groupBy");
   if (groupBy) groupBy.value = state.filter.groupBy;
   const viewMode = document.getElementById("viewMode");
