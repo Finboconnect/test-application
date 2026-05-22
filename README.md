@@ -2,7 +2,7 @@
 
 Fully static, offline-capable Kanban app with multiple boards, drag-and-drop, task create/edit/delete, dark mode, and IndexedDB persistence.
 
-## Files
+### Files
 - `index.html` – UI shell + modal
 - `style.css` – light/dark themes
 - `script.js` – app UI + DnD + wiring
