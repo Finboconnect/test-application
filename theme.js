@@ -1,36 +1,22 @@
-import { getSetting, setSetting } from "./db.js?v=2026-01-09-1";
-
-const THEME_KEY = "theme";
-
-function applyTheme(theme) {
-  const finalTheme = theme === "dark" ? "dark" : "light";
-  document.documentElement.dataset.theme = finalTheme;
-  return finalTheme;
-}
-
+/*
+ * Theme is locked to "light" (Jira blue + white).
+ * The exports remain so existing imports don't break.
+ */
 export async function getTheme() {
-  return (await getSetting(THEME_KEY)) || null;
+  return "light";
 }
 
-export async function setTheme(theme) {
-  const applied = applyTheme(theme);
-  await setSetting(THEME_KEY, applied);
-  return applied;
+export async function setTheme() {
+  document.documentElement.dataset.theme = "light";
+  return "light";
 }
 
 export async function initTheme() {
-  const stored = await getTheme();
-  if (stored) return applyTheme(stored);
-
-  const prefersDark =
-    typeof matchMedia === "function" &&
-    matchMedia("(prefers-color-scheme: dark)").matches;
-  const initial = prefersDark ? "dark" : "light";
-  await setSetting(THEME_KEY, initial);
-  return applyTheme(initial);
+  document.documentElement.dataset.theme = "light";
+  return "light";
 }
 
 export async function toggleTheme() {
-  const current = document.documentElement.dataset.theme || (await getTheme()) || "light";
-  return setTheme(current === "dark" ? "light" : "dark");
+  document.documentElement.dataset.theme = "light";
+  return "light";
 }

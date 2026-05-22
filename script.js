@@ -9,7 +9,7 @@ import {
   makeId,
   saveTask,
   saveTasks,
-} from "./db.js?v=2026-01-09-1";
+} from "./db.js?v=2026-05-22-2";
 import {
   COLUMN_IDS,
   COLUMN_LABELS,
@@ -20,8 +20,8 @@ import {
   renameBoard,
   setActiveBoardId,
   updateBoardSettings,
-} from "./boards.js?v=2026-01-09-1";
-import { initTheme, toggleTheme } from "./theme.js?v=2026-01-09-1";
+} from "./boards.js?v=2026-05-22-2";
+import { initTheme } from "./theme.js?v=2026-05-22-2";
 
 const state = {
   boards: [],
@@ -36,13 +36,486 @@ const state = {
   undo: null,
   swRegistration: null,
   updateRequested: false,
+  activePage: "board",
 };
 
 function nowISO() {
   return new Date().toISOString();
 }
 
-const APP_VERSION = "2026-01-09-1";
+const APP_VERSION = "2026-05-22-2";
+
+const PAGE_LABELS = {
+  board: "Board",
+  backlog: "Backlog",
+  roadmap: "Roadmap",
+  reports: "Reports",
+  issues: "Issues",
+  code: "Code",
+  releases: "Releases",
+  components: "Components",
+};
+
+const VALID_PAGES = new Set(Object.keys(PAGE_LABELS));
+
+const AVATAR_PALETTE = [
+  "#DE350B",
+  "#FF5630",
+  "#FF8B00",
+  "#FFAB00",
+  "#00875A",
+  "#00B8D9",
+  "#0052CC",
+  "#5243AA",
+  "#6554C0",
+  "#42526E",
+];
+
+function hashStringInt(s) {
+  let h = 0;
+  const str = String(s || "");
+  for (let i = 0; i < str.length; i++) h = ((h << 5) - h + str.charCodeAt(i)) | 0;
+  return Math.abs(h);
+}
+
+function issueKeyFor(task) {
+  const num = (hashStringInt(task.id) % 9999) + 1;
+  return `KAN-${num}`;
+}
+
+function avatarColorFor(name) {
+  return AVATAR_PALETTE[hashStringInt(name) % AVATAR_PALETTE.length];
+}
+
+function initialsFor(name) {
+  const parts = String(name || "").trim().split(/\s+/).filter(Boolean);
+  if (!parts.length) return "?";
+  if (parts.length === 1) return parts[0].slice(0, 1).toUpperCase();
+  return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
+}
+
+function isOverdueDate(yyyy_mm_dd) {
+  if (!yyyy_mm_dd) return false;
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const d = new Date(`${yyyy_mm_dd}T00:00:00`);
+  return !Number.isNaN(d.getTime()) && d < today;
+}
+
+function priorityIconHtml(priority) {
+  if (priority === "high") {
+    return `<span class="priority-icon priority-high" title="Highest priority" aria-label="Highest priority">▲</span>`;
+  }
+  if (priority === "medium") {
+    return `<span class="priority-icon priority-medium" title="Medium priority" aria-label="Medium priority">≡</span>`;
+  }
+  if (priority === "low") {
+    return `<span class="priority-icon priority-low" title="Lowest priority" aria-label="Lowest priority">▼</span>`;
+  }
+  return "";
+}
+
+function syncBoardNameInChrome(name) {
+  const sidebarName = document.getElementById("sidebarBoardName");
+  const breadcrumbName = document.getElementById("breadcrumbBoardName");
+  if (sidebarName) sidebarName.textContent = name;
+  if (breadcrumbName) breadcrumbName.textContent = name;
+  updatePageTitleForActivePage();
+}
+
+function updatePageTitleForActivePage() {
+  const pageEl = document.getElementById("pageTitle");
+  if (!pageEl) return;
+  const boardName = state.activeBoard?.name || "Kanban";
+  if (state.activePage === "board") {
+    pageEl.textContent = `${boardName} board`;
+    document.title = `${boardName} - Jira`;
+  } else {
+    const label = PAGE_LABELS[state.activePage] || "Board";
+    pageEl.textContent = label;
+    document.title = `${label} - ${boardName} - Jira`;
+  }
+}
+
+function pageFromHash() {
+  const h = (location.hash || "").replace(/^#\/?/, "").trim().toLowerCase();
+  return VALID_PAGES.has(h) ? h : "board";
+}
+
+function setActivePage(name) {
+  const page = VALID_PAGES.has(name) ? name : "board";
+  state.activePage = page;
+  document.body.dataset.page = page;
+
+  document.querySelectorAll(".nav-item[data-page]").forEach((node) => {
+    const isActive = node.dataset.page === page;
+    node.classList.toggle("active", isActive);
+    if (isActive) node.setAttribute("aria-current", "page");
+    else node.removeAttribute("aria-current");
+  });
+
+  updatePageTitleForActivePage();
+
+  const columns = document.getElementById("columns");
+  const pageContent = document.getElementById("pageContent");
+  if (!columns || !pageContent) return;
+
+  if (page === "board") {
+    columns.hidden = false;
+    pageContent.hidden = true;
+    pageContent.innerHTML = "";
+    renderColumns();
+    return;
+  }
+
+  columns.hidden = true;
+  pageContent.hidden = false;
+  renderActivePage();
+}
+
+function renderActivePage() {
+  const root = document.getElementById("pageContent");
+  if (!root) return;
+  switch (state.activePage) {
+    case "backlog":
+      root.innerHTML = renderIssueListPage({
+        title: "Backlog",
+        subtitle: "All issues, grouped by status",
+      });
+      wireIssueListPage(root);
+      break;
+    case "issues":
+      root.innerHTML = renderIssueListPage({
+        title: "Issues",
+        subtitle: "Search and inspect every issue in this project",
+      });
+      wireIssueListPage(root);
+      break;
+    case "roadmap":
+      root.innerHTML = renderRoadmapPage();
+      wireRoadmapPage(root);
+      break;
+    case "reports":
+      root.innerHTML = renderReportsPage();
+      break;
+    case "code":
+      root.innerHTML = renderEmptyState({
+        title: "Connect your code",
+        body: "Link a repository to see commits, branches and pull requests next to your issues.",
+        cta: "Connect repository",
+        icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 7 4 12 9 17"/><polyline points="15 7 20 12 15 17"/></svg>',
+      });
+      break;
+    case "releases":
+      root.innerHTML = renderEmptyState({
+        title: "Plan your first release",
+        body: "Group completed issues into versions to track what shipped, and when.",
+        cta: "Create version",
+        icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12l-7 7L4 11V4h7z"/><circle cx="9" cy="9" r="1.5"/></svg>',
+      });
+      break;
+    case "components":
+      root.innerHTML = renderEmptyState({
+        title: "Organise your project with components",
+        body: "Break your project into smaller pieces such as Frontend, API, Mobile to assign issues more clearly.",
+        cta: "Add component",
+        icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"/><path d="M12 3v9"/><path d="M4 7.5l8 4.5 8-4.5"/></svg>',
+      });
+      break;
+    default:
+      root.innerHTML = "";
+  }
+}
+
+function avatarHtmlFor(task) {
+  const assignee = (task.assignee || "").trim();
+  if (!assignee) {
+    return `<span class="assignee-avatar unassigned" title="Unassigned" aria-label="Unassigned">?</span>`;
+  }
+  return `<span class="assignee-avatar" style="background:${escapeText(avatarColorFor(assignee))}" title="${escapeText(assignee)}" aria-label="${escapeText(assignee)}">${escapeText(initialsFor(assignee))}</span>`;
+}
+
+function statusLozenge(status) {
+  const label = COLUMN_LABELS[status] || status;
+  return `<span class="lozenge lz-${escapeText(status)}">${escapeText(label)}</span>`;
+}
+
+function priorityCellHtml(priority) {
+  const icon = priorityIconHtml(priority);
+  return icon || `<span class="muted" style="font-size:12px;">—</span>`;
+}
+
+function issueRowHtml(task) {
+  const typeIcon = task.blocked
+    ? `<span class="issue-type-icon issue-type-bug" title="Bug">!</span>`
+    : `<span class="issue-type-icon issue-type-task" title="Task">✓</span>`;
+  const due = task.dueDate ? String(task.dueDate).slice(0, 10) : "";
+  const dueClass = due && isOverdueDate(due) ? "is-overdue" : "";
+  const assignee = (task.assignee || "").trim();
+  return `
+    <tr data-task-id="${escapeText(task.id)}">
+      <td class="col-type">${typeIcon}</td>
+      <td class="col-key"><span class="issue-key">${escapeText(issueKeyFor(task))}</span></td>
+      <td class="col-summary">${escapeText(task.title || "Untitled task")}</td>
+      <td class="col-status">${statusLozenge(task.status)}</td>
+      <td class="col-priority">${priorityCellHtml(task.priority)}</td>
+      <td class="col-assignee">
+        <span class="assignee-row">
+          ${avatarHtmlFor(task)}
+          <span class="assignee-name">${escapeText(assignee || "Unassigned")}</span>
+        </span>
+      </td>
+      <td class="col-due ${dueClass}">${escapeText(due || "—")}</td>
+    </tr>
+  `;
+}
+
+function renderIssueListPage({ title, subtitle }) {
+  const tasks = [...state.tasks];
+  const tableBody = tasks.length
+    ? tasks.map(issueRowHtml).join("")
+    : `<tr><td colspan="7" style="text-align:center; padding:32px; color:var(--muted);">No issues yet. Create one from the Board.</td></tr>`;
+  return `
+    <div class="page-toolbar">
+      <input class="input" type="search" id="pageSearch" placeholder="Search ${escapeText(title.toLowerCase())}…" />
+      <select class="select" id="pageStatusFilter">
+        <option value="">All statuses</option>
+        ${COLUMN_IDS.map((c) => `<option value="${escapeText(c)}">${escapeText(COLUMN_LABELS[c])}</option>`).join("")}
+      </select>
+      <span class="muted" style="margin-left:auto; font-size:12px;">${escapeText(subtitle)}</span>
+    </div>
+    <div class="issue-table">
+      <table>
+        <thead>
+          <tr>
+            <th></th>
+            <th>Key</th>
+            <th>Summary</th>
+            <th>Status</th>
+            <th>Priority</th>
+            <th>Assignee</th>
+            <th>Due</th>
+          </tr>
+        </thead>
+        <tbody id="issueTableBody">${tableBody}</tbody>
+      </table>
+    </div>
+  `;
+}
+
+function wireIssueListPage(root) {
+  const search = root.querySelector("#pageSearch");
+  const statusFilter = root.querySelector("#pageStatusFilter");
+  const tbody = root.querySelector("#issueTableBody");
+
+  function applyFilters() {
+    const q = (search?.value || "").trim().toLowerCase();
+    const s = statusFilter?.value || "";
+    const rows = state.tasks
+      .filter((t) => (s ? t.status === s : true))
+      .filter((t) => {
+        if (!q) return true;
+        const hay = [
+          t.title || "",
+          (t.labels || []).join(" "),
+          t.assignee || "",
+          issueKeyFor(t),
+        ]
+          .join(" ")
+          .toLowerCase();
+        return hay.includes(q);
+      });
+    tbody.innerHTML = rows.length
+      ? rows.map(issueRowHtml).join("")
+      : `<tr><td colspan="7" style="text-align:center; padding:32px; color:var(--muted);">No issues match your filters.</td></tr>`;
+    bindRowClicks();
+  }
+
+  function bindRowClicks() {
+    tbody.querySelectorAll("tr[data-task-id]").forEach((tr) => {
+      tr.addEventListener("click", () => {
+        const task = state.tasksById.get(tr.dataset.taskId);
+        if (task) openTaskModal({ mode: "edit", task });
+      });
+    });
+  }
+
+  search?.addEventListener("input", applyFilters);
+  statusFilter?.addEventListener("change", applyFilters);
+  bindRowClicks();
+}
+
+function renderRoadmapPage() {
+  const dated = state.tasks
+    .filter((t) => t.dueDate)
+    .sort((a, b) => String(a.dueDate).localeCompare(String(b.dueDate)));
+
+  if (!dated.length) {
+    return renderEmptyState({
+      title: "Plan your timeline",
+      body: "Add a due date to your issues and they will appear here, grouped by month.",
+      cta: "Go to Board",
+      ctaHref: "#/board",
+      icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="6" width="14" height="3" rx="1.5"/><rect x="7" y="11" width="14" height="3" rx="1.5"/><rect x="5" y="16" width="11" height="3" rx="1.5"/></svg>',
+    });
+  }
+
+  const byMonth = new Map();
+  for (const t of dated) {
+    const d = new Date(`${t.dueDate}T00:00:00`);
+    const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+    if (!byMonth.has(key)) byMonth.set(key, []);
+    byMonth.get(key).push(t);
+  }
+
+  const monthFormatter = new Intl.DateTimeFormat(undefined, { month: "long", year: "numeric" });
+
+  let html = "";
+  for (const [key, items] of byMonth) {
+    const [y, m] = key.split("-").map(Number);
+    const label = monthFormatter.format(new Date(y, m - 1, 1));
+    html += `
+      <div class="roadmap-month">
+        <div class="roadmap-month-title">${escapeText(label)}</div>
+        ${items
+          .map(
+            (t) => `
+          <div class="roadmap-row" data-task-id="${escapeText(t.id)}">
+            <div class="roadmap-date">${escapeText(t.dueDate)}</div>
+            <div>
+              <div class="roadmap-summary">${escapeText(t.title || "Untitled task")}</div>
+              <div class="muted" style="font-size:12px; margin-top:2px;">${escapeText(issueKeyFor(t))} · ${escapeText(t.assignee || "Unassigned")}</div>
+            </div>
+            <div>${statusLozenge(t.status)}</div>
+          </div>
+        `,
+          )
+          .join("")}
+      </div>
+    `;
+  }
+  return html;
+}
+
+function wireRoadmapPage(root) {
+  root.querySelectorAll(".roadmap-row[data-task-id]").forEach((row) => {
+    row.addEventListener("click", () => {
+      const task = state.tasksById.get(row.dataset.taskId);
+      if (task) openTaskModal({ mode: "edit", task });
+    });
+  });
+}
+
+function renderReportsPage() {
+  const total = state.tasks.length;
+  const byStatus = Object.fromEntries(COLUMN_IDS.map((c) => [c, 0]));
+  const byPriority = { high: 0, medium: 0, low: 0, none: 0 };
+  let blocked = 0;
+  let overdue = 0;
+  let unassigned = 0;
+
+  for (const t of state.tasks) {
+    if (t.status in byStatus) byStatus[t.status]++;
+    const p = t.priority || "none";
+    if (p in byPriority) byPriority[p]++;
+    if (t.blocked) blocked++;
+    if (t.dueDate && isOverdueDate(t.dueDate) && t.status !== "done") overdue++;
+    if (!(t.assignee || "").trim()) unassigned++;
+  }
+
+  const done = byStatus.done || 0;
+  const completion = total ? Math.round((done / total) * 100) : 0;
+  const maxStatus = Math.max(1, ...Object.values(byStatus));
+  const maxPriority = Math.max(1, ...Object.values(byPriority));
+
+  const statusBars = COLUMN_IDS.map((c) => {
+    const count = byStatus[c] || 0;
+    const width = Math.round((count / maxStatus) * 100);
+    return `
+      <div class="bar-row">
+        <div class="bar-label">${escapeText(COLUMN_LABELS[c])}</div>
+        <div class="bar-track"><div class="bar-fill bar-${escapeText(c)}" style="width:${width}%"></div></div>
+        <div class="bar-count">${count}</div>
+      </div>
+    `;
+  }).join("");
+
+  const priorityBars = ["high", "medium", "low", "none"]
+    .map((p) => {
+      const count = byPriority[p];
+      const width = Math.round((count / maxPriority) * 100);
+      const label = p === "none" ? "None" : p === "high" ? "Highest" : p === "medium" ? "Medium" : "Lowest";
+      return `
+        <div class="bar-row">
+          <div class="bar-label">${escapeText(label)}</div>
+          <div class="bar-track"><div class="bar-fill bar-${escapeText(p)}" style="width:${width}%"></div></div>
+          <div class="bar-count">${count}</div>
+        </div>
+      `;
+    })
+    .join("");
+
+  return `
+    <div class="stat-grid">
+      <div class="stat-card">
+        <div class="stat-label">Total issues</div>
+        <div class="stat-value">${total}</div>
+        <div class="stat-sub">In this board</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Completed</div>
+        <div class="stat-value">${done}</div>
+        <div class="stat-sub">${completion}% completion</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Overdue</div>
+        <div class="stat-value">${overdue}</div>
+        <div class="stat-sub">Past due, not done</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Blocked</div>
+        <div class="stat-value">${blocked}</div>
+        <div class="stat-sub">Flagged issues</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Unassigned</div>
+        <div class="stat-value">${unassigned}</div>
+        <div class="stat-sub">Need an owner</div>
+      </div>
+    </div>
+
+    <div>
+      <h3 class="page-section-title" style="margin-bottom:8px;">Issues by status</h3>
+      <div class="bar-list">${statusBars}</div>
+    </div>
+
+    <div>
+      <h3 class="page-section-title" style="margin-bottom:8px;">Issues by priority</h3>
+      <div class="bar-list">${priorityBars}</div>
+    </div>
+  `;
+}
+
+function renderEmptyState({ title, body, cta, ctaHref, icon }) {
+  const ctaHtml = cta
+    ? ctaHref
+      ? `<a class="btn btn-primary" href="${escapeText(ctaHref)}">${escapeText(cta)}</a>`
+      : `<button class="btn btn-primary" type="button">${escapeText(cta)}</button>`
+    : "";
+  return `
+    <div class="empty-state">
+      <div class="empty-state-icon" aria-hidden="true">${icon || ""}</div>
+      <div class="empty-state-title">${escapeText(title)}</div>
+      <div class="empty-state-body">${escapeText(body)}</div>
+      ${ctaHtml}
+    </div>
+  `;
+}
+
+function setupRouter() {
+  window.addEventListener("hashchange", () => setActivePage(pageFromHash()));
+  setActivePage(pageFromHash());
+}
 
 function parseLabels(input) {
   if (!input) return [];
@@ -275,6 +748,7 @@ function renderBoardSelect() {
         }>${escapeText(b.name)}</option>`,
     )
     .join("");
+  syncBoardNameInChrome(state.activeBoard?.name || "Kanban");
 }
 
 function renderColumns() {
@@ -422,21 +896,35 @@ function renderTasks() {
 }
 
 function renderTaskCard(task) {
-  const color = task.color || "#4f46e5";
+  const color = task.color || "#0052cc";
   const priority = task.priority || "";
-  const due = task.dueDate ? `Due: ${String(task.dueDate).slice(0, 10)}` : "";
-  const labels = Array.isArray(task.labels) ? task.labels.slice(0, 2) : [];
-
-  const badges = [];
-  if (priority === "high" || priority === "medium" || priority === "low") {
-    badges.push(`<span class="badge ${escapeText(priority)}">${escapeText(priority)}</span>`);
-  }
-  if (task.blocked) badges.push(`<span class="badge high">blocked</span>`);
-  if (due) badges.push(`<span class="badge">${escapeText(due)}</span>`);
-  for (const l of labels) badges.push(`<span class="badge">${escapeText(l)}</span>`);
+  const due = task.dueDate ? String(task.dueDate).slice(0, 10) : "";
+  const labels = Array.isArray(task.labels) ? task.labels.slice(0, 4) : [];
 
   const desc = (task.description || "").trim().replace(/\s+/g, " ");
   const descHtml = desc ? `<div class="task-desc">${escapeText(desc.slice(0, 160))}</div>` : "";
+
+  const labelChipsHtml = labels.length
+    ? `<div class="task-labels">${labels
+        .map((l) => `<span class="task-label">${escapeText(l)}</span>`)
+        .join("")}</div>`
+    : "";
+
+  const dueChipHtml = due
+    ? `<span class="task-due ${isOverdueDate(due) ? "is-overdue" : ""}" title="Due ${escapeText(due)}">${escapeText(due)}</span>`
+    : "";
+  const metaRowHtml = dueChipHtml ? `<div class="task-meta-row">${dueChipHtml}</div>` : "";
+
+  const issueKey = issueKeyFor(task);
+  const typeIconHtml = task.blocked
+    ? `<span class="issue-type-icon issue-type-bug" title="Bug" aria-label="Bug">!</span>`
+    : `<span class="issue-type-icon issue-type-task" title="Task" aria-label="Task">✓</span>`;
+  const priorityHtml = priorityIconHtml(priority);
+
+  const assignee = (task.assignee || "").trim();
+  const avatarHtml = assignee
+    ? `<span class="assignee-avatar" style="background:${escapeText(avatarColorFor(assignee))}" title="Assigned to ${escapeText(assignee)}" aria-label="Assigned to ${escapeText(assignee)}">${escapeText(initialsFor(assignee))}</span>`
+    : `<span class="assignee-avatar unassigned" title="Unassigned" aria-label="Unassigned">?</span>`;
 
   const bulkCheck = state.bulk.enabled
     ? `<input class="bulk-check" type="checkbox" ${state.bulk.selected.has(task.id) ? "checked" : ""} aria-label="Select task" />`
@@ -449,20 +937,25 @@ function renderTaskCard(task) {
   return `
     <article class="task-card ${bulkClass} ${selectedClass} ${blockedClass}" role="listitem" tabindex="0" ${draggable} data-task-id="${escapeText(
       task.id,
-    )}">
+    )}" style="--card-accent:${escapeText(color)}">
       ${bulkCheck}
       <div class="task-actions">
-        <button class="mini-btn" type="button" data-dir="left" aria-label="Move left">&lt;</button>
-        <button class="mini-btn" type="button" data-dir="right" aria-label="Move right">&gt;</button>
+        <button class="mini-btn" type="button" data-dir="left" aria-label="Move left">&lsaquo;</button>
+        <button class="mini-btn" type="button" data-dir="right" aria-label="Move right">&rsaquo;</button>
       </div>
-      <div class="task-title">
-        <span class="task-color" style="background:${escapeText(color)}" aria-hidden="true"></span>
-        <span>${escapeText(task.title || "Untitled task")}</span>
-      </div>
+      <div class="task-title">${escapeText(task.title || "Untitled task")}</div>
       ${descHtml}
-      <div class="task-meta">
-        ${badges.join("")}
-        <span class="badge">Updated: ${escapeText(shortDate(task.updatedAt))}</span>
+      ${labelChipsHtml}
+      ${metaRowHtml}
+      <div class="task-footer">
+        <div class="task-footer-left">
+          ${typeIconHtml}
+          <span class="issue-key">${escapeText(issueKey)}</span>
+          ${priorityHtml}
+        </div>
+        <div class="task-footer-right">
+          ${avatarHtml}
+        </div>
       </div>
     </article>
   `;
@@ -1176,7 +1669,12 @@ async function reloadAndRerender() {
   const groupBy = document.getElementById("groupBy");
   if (groupBy) groupBy.value = state.filter.groupBy;
   renderBulkBar();
-  renderColumns();
+  if (state.activePage === "board") {
+    renderColumns();
+  } else {
+    renderActivePage();
+    updatePageTitleForActivePage();
+  }
 }
 
 async function onQuickAdd() {
@@ -1600,9 +2098,6 @@ function wireEvents() {
   el("renameBoardBtn").addEventListener("click", onRenameBoard);
   el("deleteBoardBtn").addEventListener("click", onDeleteBoard);
   el("boardSelect").addEventListener("change", onBoardSelectChange);
-  el("themeToggle").addEventListener("click", async () => {
-    await toggleTheme();
-  });
 
   document.getElementById("quickAddBtn")?.addEventListener("click", onQuickAdd);
   document.getElementById("quickAddTitle")?.addEventListener("keydown", (e) => {
@@ -1794,7 +2289,7 @@ async function main() {
   const groupBy = document.getElementById("groupBy");
   if (groupBy) groupBy.value = state.filter.groupBy;
   renderBulkBar();
-  renderColumns();
+  setupRouter();
   state.swRegistration = await registerServiceWorker();
 }
 

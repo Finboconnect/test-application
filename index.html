@@ -3,85 +3,184 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Kanban</title>
+    <title>Kanban Board - Jira</title>
     <meta name="color-scheme" content="light dark" />
-    <link rel="stylesheet" href="style.css?v=2026-01-09-1" />
+    <link rel="stylesheet" href="style.css?v=2026-05-22-2" />
   </head>
   <body>
-    <header class="app-header">
-      <div class="brand">
-        <div class="brand-title">Kanban</div>
-        <div class="brand-subtitle">Offline • IndexedDB • Multi-board</div>
-      </div>
-
-      <div class="toolbar" role="toolbar" aria-label="Kanban controls">
-        <label class="field">
-          <span class="field-label">Board</span>
-          <select id="boardSelect" class="select" aria-label="Select board"></select>
-        </label>
-
-        <div class="toolbar-buttons">
-          <button id="newBoardBtn" class="btn" type="button">New board</button>
-          <button id="renameBoardBtn" class="btn" type="button">Rename</button>
-          <button id="deleteBoardBtn" class="btn btn-danger" type="button">Delete</button>
-        </div>
-
-        <label class="field">
-          <span class="field-label">Quick add (To Do)</span>
-          <div class="inline">
-            <input id="quickAddTitle" class="input" type="text" placeholder="Task title…" maxlength="120" />
-            <button id="quickAddBtn" class="btn btn-primary" type="button">Add</button>
+    <div class="app-shell">
+      <aside class="app-sidebar" aria-label="Project navigation">
+        <div class="sidebar-project">
+          <div class="project-avatar" aria-hidden="true">K</div>
+          <div class="project-info">
+            <div class="project-name" id="sidebarBoardName">Kanban</div>
+            <div class="project-subtitle">Software project</div>
           </div>
-        </label>
-
-        <label class="field">
-          <span class="field-label">Search</span>
-          <input id="searchInput" class="input" type="search" placeholder="Title, tags, assignee…" />
-        </label>
-
-        <label class="field">
-          <span class="field-label">Priority</span>
-          <select id="priorityFilter" class="select" aria-label="Filter by priority">
-            <option value="">All</option>
-            <option value="high">High</option>
-            <option value="medium">Medium</option>
-            <option value="low">Low</option>
-            <option value="none">None</option>
-          </select>
-        </label>
-
-        <label class="field">
-          <span class="field-label">Group</span>
-          <select id="groupBy" class="select" aria-label="Group tasks">
-            <option value="none">None</option>
-            <option value="priority">Priority</option>
-            <option value="label">Label</option>
-          </select>
-        </label>
-
-        <div class="toolbar-buttons">
-          <button id="bulkToggleBtn" class="btn" type="button" aria-pressed="false">Bulk</button>
-          <button id="exportBtn" class="btn" type="button">Export</button>
-          <button id="importBtn" class="btn" type="button">Import</button>
-          <button id="resetBoardBtn" class="btn btn-danger" type="button">Reset</button>
-          <button id="boardSettingsBtn" class="btn" type="button">Settings</button>
-          <button id="insightsBtn" class="btn" type="button">Insights</button>
         </div>
 
-        <button id="themeToggle" class="btn btn-icon" type="button" aria-label="Toggle theme">
-          <span class="icon" aria-hidden="true">◐</span>
-        </button>
-      </div>
-    </header>
+        <nav class="sidebar-nav" aria-label="Project sections">
+          <div class="nav-section-title">Planning</div>
+          <a class="nav-item" data-page="roadmap" href="#/roadmap">
+            <span class="nav-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="6" width="14" height="3" rx="1.5"/><rect x="7" y="11" width="14" height="3" rx="1.5"/><rect x="5" y="16" width="11" height="3" rx="1.5"/></svg>
+            </span>
+            <span>Roadmap</span>
+          </a>
+          <a class="nav-item" data-page="backlog" href="#/backlog">
+            <span class="nav-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="7" x2="20" y2="7"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="17" x2="14" y2="17"/></svg>
+            </span>
+            <span>Backlog</span>
+          </a>
+          <a class="nav-item active" data-page="board" href="#/board" aria-current="page">
+            <span class="nav-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="13" rx="1.5"/><rect x="14" y="3" width="7" height="9" rx="1.5"/><rect x="3" y="18" width="7" height="3" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
+            </span>
+            <span>Board</span>
+          </a>
+          <a class="nav-item" data-page="reports" href="#/reports">
+            <span class="nav-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="20" x2="20" y2="20"/><rect x="6" y="10" width="3" height="8" rx="0.5"/><rect x="11" y="6" width="3" height="12" rx="0.5"/><rect x="16" y="13" width="3" height="5" rx="0.5"/></svg>
+            </span>
+            <span>Reports</span>
+          </a>
 
-    <main class="app-main">
-      <div id="updateBanner" class="banner" hidden role="status" aria-live="polite">
-        <div class="banner-text">A new version is available.</div>
-        <button id="refreshBtn" class="btn btn-primary" type="button">Refresh</button>
-      </div>
+          <div class="nav-section-title">Development</div>
+          <a class="nav-item" data-page="code" href="#/code">
+            <span class="nav-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 7 4 12 9 17"/><polyline points="15 7 20 12 15 17"/></svg>
+            </span>
+            <span>Code</span>
+          </a>
+          <a class="nav-item" data-page="releases" href="#/releases">
+            <span class="nav-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12l-7 7L4 11V4h7z"/><circle cx="9" cy="9" r="1.5"/></svg>
+            </span>
+            <span>Releases</span>
+          </a>
 
-      <div id="columns" class="columns" aria-label="Kanban board"></div>
-    </main>
+          <div class="nav-section-title">Operations</div>
+          <a class="nav-item" data-page="issues" href="#/issues">
+            <span class="nav-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 21V4h11l-1 4 1 4H5"/></svg>
+            </span>
+            <span>Issues</span>
+          </a>
+          <a class="nav-item" data-page="components" href="#/components">
+            <span class="nav-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"/><path d="M12 3v9"/><path d="M4 7.5l8 4.5 8-4.5"/></svg>
+            </span>
+            <span>Components</span>
+          </a>
+        </nav>
+
+        <div class="sidebar-spacer"></div>
+
+        <div class="sidebar-footer">
+          <a class="nav-item" href="#/board">
+            <span class="nav-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+            </span>
+            <span>Add shortcut</span>
+          </a>
+          <a class="nav-item" id="sidebarSettingsBtn" href="#/board">
+            <span class="nav-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3h.1a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8v.1a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+            </span>
+            <span>Project settings</span>
+          </a>
+        </div>
+      </aside>
+
+      <div class="app-content">
+        <header class="app-topbar app-header">
+          <div class="brand">
+            <div class="brand-title">Kanban</div>
+            <div class="brand-subtitle">Offline · IndexedDB · Multi-board</div>
+          </div>
+
+          <div class="breadcrumb">
+            <a href="#">Projects</a>
+            <span class="sep">/</span>
+            <a href="#" id="breadcrumbBoardName">Kanban</a>
+            <span class="sep">/</span>
+            <span>Board</span>
+          </div>
+
+          <div class="page-title-row">
+            <h1 class="page-title" id="pageTitle">Kanban board</h1>
+
+            <div class="page-title-actions">
+              <button id="bulkToggleBtn" class="btn board-only" type="button" aria-pressed="false">Bulk edit</button>
+              <button id="insightsBtn" class="btn board-only" type="button">Insights</button>
+              <button id="boardSettingsBtn" class="btn board-only" type="button">Settings</button>
+            </div>
+          </div>
+
+          <div class="toolbar" role="toolbar" aria-label="Board controls">
+            <label class="field compact">
+              <span class="field-label">Board</span>
+              <select id="boardSelect" class="select" aria-label="Select board"></select>
+            </label>
+
+            <div class="toolbar-buttons">
+              <button id="newBoardBtn" class="btn" type="button">+ Create board</button>
+              <button id="renameBoardBtn" class="btn" type="button">Rename</button>
+              <button id="deleteBoardBtn" class="btn btn-danger" type="button">Delete</button>
+            </div>
+
+            <label class="field compact">
+              <span class="field-label">Quick create</span>
+              <div class="inline">
+                <input id="quickAddTitle" class="input" type="text" placeholder="What needs to be done?" maxlength="120" />
+                <button id="quickAddBtn" class="btn btn-primary" type="button">Create</button>
+              </div>
+            </label>
+
+            <label class="field compact">
+              <span class="field-label">Search</span>
+              <input id="searchInput" class="input" type="search" placeholder="Title, label, assignee…" />
+            </label>
+
+            <label class="field compact">
+              <span class="field-label">Priority</span>
+              <select id="priorityFilter" class="select" aria-label="Filter by priority">
+                <option value="">All</option>
+                <option value="high">Highest</option>
+                <option value="medium">Medium</option>
+                <option value="low">Lowest</option>
+                <option value="none">None</option>
+              </select>
+            </label>
+
+            <label class="field compact">
+              <span class="field-label">Group by</span>
+              <select id="groupBy" class="select" aria-label="Group tasks">
+                <option value="none">None</option>
+                <option value="priority">Priority</option>
+                <option value="label">Label</option>
+              </select>
+            </label>
+
+            <div class="toolbar-buttons">
+              <button id="exportBtn" class="btn" type="button">Export</button>
+              <button id="importBtn" class="btn" type="button">Import</button>
+              <button id="resetBoardBtn" class="btn btn-danger" type="button">Reset</button>
+            </div>
+          </div>
+        </header>
+
+        <main class="app-main">
+          <div id="updateBanner" class="banner" hidden role="status" aria-live="polite">
+            <div class="banner-text">A new version is available.</div>
+            <button id="refreshBtn" class="btn btn-primary" type="button">Refresh</button>
+          </div>
+
+          <div id="columns" class="columns" aria-label="Kanban board"></div>
+          <div id="pageContent" class="page-content" hidden></div>
+        </main>
+      </div>
+    </div>
 
     <div id="bulkBar" class="bulk-bar" hidden role="region" aria-label="Bulk actions">
       <div class="bulk-left">
@@ -127,7 +226,7 @@
         <input id="taskId" type="hidden" />
 
         <label class="field">
-          <span class="field-label">Title</span>
+          <span class="field-label">Summary</span>
           <input id="taskTitle" class="input" type="text" required maxlength="120" />
         </label>
 
@@ -151,9 +250,9 @@
             <span class="field-label">Priority</span>
             <select id="taskPriority" class="select">
               <option value="">None</option>
-              <option value="low">Low</option>
+              <option value="low">Lowest</option>
               <option value="medium">Medium</option>
-              <option value="high">High</option>
+              <option value="high">Highest</option>
             </select>
           </label>
         </div>
@@ -175,17 +274,17 @@
             <input id="taskLabels" class="input" type="text" placeholder="frontend, bug, urgent" />
           </label>
           <label class="field checkbox-field">
-            <span class="field-label">Blocked</span>
+            <span class="field-label">Flagged</span>
             <div class="inline">
               <input id="taskBlocked" type="checkbox" />
-              <span class="muted" style="font-size:12px;">Show as blocked</span>
+              <span class="muted" style="font-size:12px;">Mark as blocked</span>
             </div>
           </label>
         </div>
 
         <label class="field">
-          <span class="field-label">Color (optional)</span>
-          <input id="taskColor" class="input" type="color" value="#4f46e5" />
+          <span class="field-label">Card color (epic accent)</span>
+          <input id="taskColor" class="input" type="color" value="#0052cc" />
         </label>
 
         <div class="section">
@@ -273,6 +372,6 @@
       <div class="noscript">This app requires JavaScript.</div>
     </noscript>
 
-    <script type="module" src="script.js?v=2026-01-09-1"></script>
+    <script type="module" src="script.js?v=2026-05-22-2"></script>
   </body>
 </html>
