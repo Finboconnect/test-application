@@ -1,4 +1,4 @@
-import { getBoards, getSetting, makeId, saveBoard, setSetting, deleteBoard } from "./db.js?v=2026-05-22-2";
+import { getBoards, getSetting, makeId, saveBoard, setSetting, deleteBoard } from "./db.js?v=2026-05-22-3";
 
 export const COLUMN_IDS = ["todo", "inprogress", "review", "test", "done"];
 

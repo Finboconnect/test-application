@@ -3,18 +3,24 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Kanban Board - Jira</title>
-    <meta name="color-scheme" content="light dark" />
-    <link rel="stylesheet" href="style.css?v=2026-05-22-2" />
+    <title>Franklyn - Workspace</title>
+    <meta name="color-scheme" content="light" />
+    <meta name="theme-color" content="#0052cc" />
+    <link
+      rel="icon"
+      type="image/svg+xml"
+      href="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><defs><linearGradient id='g' x1='0' y1='0' x2='1' y2='1'><stop offset='0%25' stop-color='%2300b8d9'/><stop offset='55%25' stop-color='%230052cc'/><stop offset='100%25' stop-color='%23403294'/></linearGradient></defs><rect width='64' height='64' rx='14' fill='url(%23g)'/><text x='32' y='44' font-family='-apple-system,system-ui,sans-serif' font-size='38' font-weight='800' fill='white' text-anchor='middle' letter-spacing='-1'>F</text></svg>"
+    />
+    <link rel="stylesheet" href="style.css?v=2026-05-22-3" />
   </head>
   <body>
     <div class="app-shell">
       <aside class="app-sidebar" aria-label="Project navigation">
         <div class="sidebar-project">
-          <div class="project-avatar" aria-hidden="true">K</div>
+          <div class="project-avatar" aria-hidden="true">F</div>
           <div class="project-info">
-            <div class="project-name" id="sidebarBoardName">Kanban</div>
-            <div class="project-subtitle">Software project</div>
+            <div class="project-name">Franklyn</div>
+            <div class="project-subtitle">Personal workspace</div>
           </div>
         </div>
 
@@ -89,6 +95,10 @@
             </span>
             <span>Project settings</span>
           </a>
+          <div class="sidebar-signature">
+            <span class="sig-dot" aria-hidden="true"></span>
+            <span>Crafted by Franklyn · v1.0</span>
+          </div>
         </div>
       </aside>
 
@@ -100,20 +110,85 @@
           </div>
 
           <div class="breadcrumb">
-            <a href="#">Projects</a>
+            <a href="#/board">Projects</a>
             <span class="sep">/</span>
-            <a href="#" id="breadcrumbBoardName">Kanban</a>
+            <a href="#/board" id="breadcrumbBoardName">Franklyn</a>
             <span class="sep">/</span>
-            <span>Board</span>
+            <span id="breadcrumbPageName">Board</span>
+            <span id="todayPill" class="today-pill" aria-label="Today">
+              <span class="today-dot" aria-hidden="true"></span>
+              <span id="todayPillText">Today</span>
+            </span>
           </div>
 
           <div class="page-title-row">
-            <h1 class="page-title" id="pageTitle">Kanban board</h1>
+            <h1 class="page-title" id="pageTitle">Board</h1>
 
             <div class="page-title-actions">
               <button id="bulkToggleBtn" class="btn board-only" type="button" aria-pressed="false">Bulk edit</button>
               <button id="insightsBtn" class="btn board-only" type="button">Insights</button>
               <button id="boardSettingsBtn" class="btn board-only" type="button">Settings</button>
+
+              <div class="user-menu-wrapper">
+                <button
+                  id="userAvatarBtn"
+                  class="user-avatar-btn"
+                  type="button"
+                  aria-haspopup="menu"
+                  aria-expanded="false"
+                  aria-controls="userMenu"
+                  title="Franklyn"
+                >F</button>
+                <div id="userMenu" class="user-menu" role="menu" hidden>
+                  <div class="user-menu-header">
+                    <span class="user-avatar-btn" aria-hidden="true">F</span>
+                    <div>
+                      <div class="user-menu-name">Franklyn</div>
+                      <div class="user-menu-email">franklyn@workspace.local</div>
+                    </div>
+                  </div>
+                  <div class="user-menu-list">
+                    <button class="user-menu-item" type="button" role="menuitem" data-action="profile">
+                      <span class="menu-icon" aria-hidden="true">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4.4 3.6-8 8-8s8 3.6 8 8"/></svg>
+                      </span>
+                      <span>Profile</span>
+                    </button>
+                    <button class="user-menu-item" type="button" role="menuitem" data-action="notifications">
+                      <span class="menu-icon" aria-hidden="true">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 16v-5a6 6 0 1 0-12 0v5l-2 2h16z"/><path d="M10 20a2 2 0 0 0 4 0"/></svg>
+                      </span>
+                      <span>Notifications</span>
+                    </button>
+                    <button class="user-menu-item" type="button" role="menuitem" data-action="theme">
+                      <span class="menu-icon" aria-hidden="true">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 3v18"/></svg>
+                      </span>
+                      <span>Appearance</span>
+                    </button>
+                    <div class="user-menu-divider" role="separator"></div>
+                    <button class="user-menu-item" type="button" role="menuitem" data-action="logout">
+                      <span class="menu-icon" aria-hidden="true">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 17l5-5-5-5"/><path d="M20 12H9"/><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/></svg>
+                      </span>
+                      <span>Log out</span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="board-meta board-only" id="boardMeta">
+            <div class="sprint-chip" id="sprintChip">
+              <span class="sprint-tag">Sprint</span>
+              <span class="sprint-sep" aria-hidden="true"></span>
+              <span class="sprint-status" id="sprintStatusText">Active</span>
+            </div>
+            <div class="assignee-group" id="assigneeGroup" hidden>
+              <span class="assignee-group-label">People</span>
+              <span class="assignee-stack" id="assigneeStack"></span>
+              <button class="assignee-clear" id="assigneeClear" type="button" hidden>Clear</button>
             </div>
           </div>
 
@@ -372,6 +447,6 @@
       <div class="noscript">This app requires JavaScript.</div>
     </noscript>
 
-    <script type="module" src="script.js?v=2026-05-22-2"></script>
+    <script type="module" src="script.js?v=2026-05-22-3"></script>
   </body>
 </html>

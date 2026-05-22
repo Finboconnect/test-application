@@ -9,7 +9,7 @@ import {
   makeId,
   saveTask,
   saveTasks,
-} from "./db.js?v=2026-05-22-2";
+} from "./db.js?v=2026-05-22-3";
 import {
   COLUMN_IDS,
   COLUMN_LABELS,
@@ -20,8 +20,8 @@ import {
   renameBoard,
   setActiveBoardId,
   updateBoardSettings,
-} from "./boards.js?v=2026-05-22-2";
-import { initTheme } from "./theme.js?v=2026-05-22-2";
+} from "./boards.js?v=2026-05-22-3";
+import { initTheme } from "./theme.js?v=2026-05-22-3";
 
 const state = {
   boards: [],
@@ -30,7 +30,7 @@ const state = {
   tasks: [],
   tasksById: new Map(),
   draggingEl: null,
-  filter: { search: "", priority: "", groupBy: "none" },
+  filter: { search: "", priority: "", groupBy: "none", assignee: "" },
   bulk: { enabled: false, selected: new Set() },
   modal: { openId: null, dirty: false, preview: false, focusTrapCleanup: null },
   undo: null,
@@ -43,7 +43,7 @@ function nowISO() {
   return new Date().toISOString();
 }
 
-const APP_VERSION = "2026-05-22-2";
+const APP_VERSION = "2026-05-22-3";
 
 const PAGE_LABELS = {
   board: "Board",
@@ -115,26 +115,25 @@ function priorityIconHtml(priority) {
   return "";
 }
 
-function syncBoardNameInChrome(name) {
-  const sidebarName = document.getElementById("sidebarBoardName");
-  const breadcrumbName = document.getElementById("breadcrumbBoardName");
-  if (sidebarName) sidebarName.textContent = name;
-  if (breadcrumbName) breadcrumbName.textContent = name;
+function syncBoardNameInChrome() {
   updatePageTitleForActivePage();
 }
 
 function updatePageTitleForActivePage() {
   const pageEl = document.getElementById("pageTitle");
-  if (!pageEl) return;
-  const boardName = state.activeBoard?.name || "Kanban";
-  if (state.activePage === "board") {
-    pageEl.textContent = `${boardName} board`;
-    document.title = `${boardName} - Jira`;
-  } else {
-    const label = PAGE_LABELS[state.activePage] || "Board";
-    pageEl.textContent = label;
-    document.title = `${label} - ${boardName} - Jira`;
+  const crumbPage = document.getElementById("breadcrumbPageName");
+  const boardName = state.activeBoard?.name || "Board";
+  const pageLabel = PAGE_LABELS[state.activePage] || "Board";
+
+  if (pageEl) {
+    pageEl.textContent = state.activePage === "board" ? `${boardName} board` : pageLabel;
   }
+  if (crumbPage) crumbPage.textContent = pageLabel;
+
+  document.title =
+    state.activePage === "board"
+      ? `${boardName} board · Franklyn`
+      : `${pageLabel} · Franklyn`;
 }
 
 function pageFromHash() {
@@ -517,6 +516,193 @@ function setupRouter() {
   setActivePage(pageFromHash());
 }
 
+function renderTodayPill() {
+  const text = document.getElementById("todayPillText");
+  if (!text) return;
+  const today = new Date();
+  text.textContent = today.toLocaleDateString(undefined, {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+  });
+}
+
+function renderSprintChip() {
+  const chip = document.getElementById("sprintChip");
+  const statusText = document.getElementById("sprintStatusText");
+  if (!chip || !statusText) return;
+
+  chip.classList.remove("is-warning", "is-overdue");
+
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const futureDates = state.tasks
+    .filter((t) => t.dueDate && t.status !== "done")
+    .map((t) => new Date(`${t.dueDate}T00:00:00`))
+    .filter((d) => !Number.isNaN(d.getTime()));
+
+  if (!futureDates.length) {
+    statusText.textContent = "Active";
+    return;
+  }
+
+  futureDates.sort((a, b) => a - b);
+  const earliest = futureDates[0];
+  const diffMs = earliest - today;
+  const days = Math.round(diffMs / (1000 * 60 * 60 * 24));
+
+  if (days < 0) {
+    chip.classList.add("is-overdue");
+    statusText.textContent = `${Math.abs(days)} day${Math.abs(days) === 1 ? "" : "s"} overdue`;
+  } else if (days === 0) {
+    chip.classList.add("is-warning");
+    statusText.textContent = "Due today";
+  } else if (days <= 3) {
+    chip.classList.add("is-warning");
+    statusText.textContent = `${days} day${days === 1 ? "" : "s"} remaining`;
+  } else {
+    statusText.textContent = `${days} days remaining`;
+  }
+}
+
+function renderAssigneeGroup() {
+  const group = document.getElementById("assigneeGroup");
+  const stack = document.getElementById("assigneeStack");
+  const clearBtn = document.getElementById("assigneeClear");
+  if (!group || !stack || !clearBtn) return;
+
+  const counts = new Map();
+  for (const t of state.tasks) {
+    const a = (t.assignee || "").trim();
+    if (!a) continue;
+    counts.set(a, (counts.get(a) || 0) + 1);
+  }
+
+  if (!counts.size) {
+    group.hidden = true;
+    stack.innerHTML = "";
+    return;
+  }
+
+  const sorted = [...counts.entries()].sort((a, b) => b[1] - a[1]);
+  const visible = sorted.slice(0, 5);
+  const rest = sorted.length - visible.length;
+
+  group.hidden = false;
+  const activeAssignee = state.filter.assignee || "";
+
+  stack.innerHTML =
+    visible
+      .map(([name, n]) => {
+        const isActive = name.toLowerCase() === activeAssignee.toLowerCase();
+        return `<button class="assignee-avatar ${isActive ? "is-active" : ""}" type="button" style="background:${escapeText(avatarColorFor(name))}" title="${escapeText(name)} · ${n} issue${n === 1 ? "" : "s"}" aria-label="Filter by ${escapeText(name)}" data-assignee="${escapeText(name)}">${escapeText(initialsFor(name))}</button>`;
+      })
+      .join("") + (rest > 0 ? `<span class="assignee-more" title="${rest} more">+${rest}</span>` : "");
+
+  stack.querySelectorAll("[data-assignee]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const name = btn.dataset.assignee || "";
+      state.filter.assignee = state.filter.assignee === name ? "" : name;
+      renderAssigneeGroup();
+      renderColumns();
+    });
+  });
+
+  clearBtn.hidden = !activeAssignee;
+  clearBtn.onclick = () => {
+    state.filter.assignee = "";
+    renderAssigneeGroup();
+    renderColumns();
+  };
+}
+
+function renderBoardMeta() {
+  if (state.activePage !== "board") return;
+  renderSprintChip();
+  renderAssigneeGroup();
+}
+
+function showWelcomeIfEmpty() {
+  if (state.activePage !== "board") return;
+  const columns = document.getElementById("columns");
+  if (!columns) return;
+  if (state.tasks.length > 0) return;
+
+  columns.innerHTML = `
+    <div class="welcome-card" style="grid-column: 1 / -1;">
+      <div class="welcome-greeting">Welcome, Franklyn</div>
+      <div class="welcome-title">Your board is ready.</div>
+      <div class="welcome-body">
+        This is your personal Jira-style workspace. Drop a quick task above, or open the create dialog to add details like priority, assignee, and a due date.
+        Your data stays on this device — IndexedDB powered, fully offline.
+      </div>
+      <div class="welcome-actions">
+        <button class="btn btn-primary" type="button" id="welcomeCreateBtn">+ Create your first issue</button>
+        <a class="btn" href="#/backlog">Open backlog</a>
+      </div>
+    </div>
+  `;
+
+  const createBtn = document.getElementById("welcomeCreateBtn");
+  if (createBtn) {
+    createBtn.addEventListener("click", () => {
+      const input = document.getElementById("quickAddTitle");
+      if (input) input.focus();
+    });
+  }
+}
+
+function wireUserMenu() {
+  const btn = document.getElementById("userAvatarBtn");
+  const menu = document.getElementById("userMenu");
+  if (!btn || !menu) return;
+
+  function close() {
+    menu.hidden = true;
+    btn.setAttribute("aria-expanded", "false");
+    document.removeEventListener("click", onOutside, true);
+    document.removeEventListener("keydown", onEsc, true);
+  }
+
+  function open() {
+    menu.hidden = false;
+    btn.setAttribute("aria-expanded", "true");
+    document.addEventListener("click", onOutside, true);
+    document.addEventListener("keydown", onEsc, true);
+  }
+
+  function onOutside(e) {
+    if (!menu.contains(e.target) && e.target !== btn) close();
+  }
+  function onEsc(e) {
+    if (e.key === "Escape") {
+      close();
+      btn.focus();
+    }
+  }
+
+  btn.addEventListener("click", () => {
+    if (menu.hidden) open();
+    else close();
+  });
+
+  menu.querySelectorAll(".user-menu-item[data-action]").forEach((item) => {
+    item.addEventListener("click", () => {
+      const action = item.dataset.action;
+      close();
+      if (action === "logout") {
+        showToast("Logged out (demo)", { timeoutMs: 3000 });
+      } else if (action === "profile") {
+        showToast("Profile coming soon", { timeoutMs: 3000 });
+      } else if (action === "notifications") {
+        showToast("You're all caught up", { timeoutMs: 3000 });
+      } else if (action === "theme") {
+        showToast("Appearance: Light only", { timeoutMs: 3000 });
+      }
+    });
+  });
+}
+
 function parseLabels(input) {
   if (!input) return [];
   if (Array.isArray(input)) return input.map((s) => String(s).trim()).filter(Boolean);
@@ -649,11 +835,16 @@ function taskCounts(tasks) {
 function filteredTasks() {
   const q = state.filter.search.trim().toLowerCase();
   const pf = state.filter.priority;
+  const af = (state.filter.assignee || "").trim().toLowerCase();
   return state.tasks.filter((t) => {
     if (pf === "high" || pf === "medium" || pf === "low") {
       if (t.priority !== pf) return false;
     } else if (pf === "none") {
       if ((t.priority || "") !== "") return false;
+    }
+    if (af) {
+      const ta = (t.assignee || "").trim().toLowerCase();
+      if (ta !== af) return false;
     }
     if (!q) return true;
     const hay = [
@@ -821,6 +1012,8 @@ function renderColumns() {
   });
 
   renderTasks();
+  renderBoardMeta();
+  showWelcomeIfEmpty();
 }
 
 function renderTasks() {
@@ -2285,6 +2478,8 @@ async function main() {
   await loadBoardsAndActive();
   await loadTasks();
   wireEvents();
+  wireUserMenu();
+  renderTodayPill();
   renderBoardSelect();
   const groupBy = document.getElementById("groupBy");
   if (groupBy) groupBy.value = state.filter.groupBy;

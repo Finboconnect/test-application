@@ -1,4 +1,4 @@
-const APP_VERSION = "2026-05-22-2";
+const APP_VERSION = "2026-05-22-3";
 const CACHE_NAME = `kanban-static-${APP_VERSION}`;
 const ASSETS = [
   "./",
