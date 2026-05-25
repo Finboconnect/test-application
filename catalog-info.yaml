@@ -5,9 +5,9 @@ metadata:
   description: my test application.
   # Example for optional annotations
   # annotations:
-     github.com/project-slug: Finboconnect/test-application
+  github.com/project-slug: Finboconnect/test-application
   #   backstage.io/techdocs-ref: dir:.
 spec:
-  type: website
-  owner: john@example.com
+  type: service
+  owner: iambrotherfranklyn@gmail.com
   lifecycle: experimental
