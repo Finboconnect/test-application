@@ -3,11 +3,10 @@ kind: Component
 metadata:
   name: test-application
   description: my test application.
-  # Example for optional annotations
-  # annotations:
-  github.com/project-slug: Finboconnect/test-application
-  #   backstage.io/techdocs-ref: dir:.
+  annotations:
+    github.com/project-slug: Finboconnect/test-application
+    # backstage.io/techdocs-ref: dir:.
 spec:
   type: service
-  owner: iambrotherfranklyn@gmail.com
+  owner: user:default/iambrotherfranklyn  # or a Group — see below
   lifecycle: experimental
