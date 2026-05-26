@@ -5,6 +5,9 @@ metadata:
   description: my test application.
   annotations:
     github.com/project-slug: Finboconnect/test-application
+    backstage.io/kubernetes-id: kanban-dev
+    backstage.io/kubernetes-namespace: dev
+    backstage.io/kubernetes-label-selector: app=kanban-dev
     # backstage.io/techdocs-ref: dir:.
 spec:
   type: service
