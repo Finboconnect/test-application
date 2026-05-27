@@ -1,0 +1,133 @@
+name: Application build
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment_name:
+        required: true
+        type: string
+      image_tag:
+        required: true
+        type: string
+      ecr_repository_url:
+        required: true
+        type: string
+      aws_region:
+        required: true
+        type: string
+      git_branch:
+        required: true
+        type: string
+
+jobs:
+  build:
+    runs-on: kanban-runners
+    permissions:
+      contents: write
+      id-token: write
+    env:
+      SMALL_CHALLANGE_WEBHOOK_URL: ${{ secrets.SMALL_CHALLANGE_WEBHOOK_URL }}
+      SMALL_CHALLANGE_WEBHOOK_TOKEN: ${{ secrets.SMALL_CHALLANGE_WEBHOOK_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.git_branch }}
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_APPLICATION_BUILD_ROLE_ARN }}
+          aws-region: ${{ inputs.aws_region }}
+      - uses: aws-actions/amazon-ecr-login@v2
+      - name: Build and push image
+        id: build_push
+        continue-on-error: true
+        run: |
+          docker build -t "${{ inputs.ecr_repository_url }}:${{ inputs.image_tag }}" .
+          docker push "${{ inputs.ecr_repository_url }}:${{ inputs.image_tag }}"
+      - name: Update GitOps manifest image
+        id: manifest
+        if: ${{ steps.build_push.outcome == 'success' }}
+        continue-on-error: true
+        shell: bash
+        env:
+          IMAGE_REPOSITORY: ${{ inputs.ecr_repository_url }}
+          IMAGE_TAG: ${{ inputs.image_tag }}
+          IMAGE_URI: ${{ inputs.ecr_repository_url }}:${{ inputs.image_tag }}
+        run: |
+          STATUS="skipped"
+          MANIFEST_URL=""
+          if [[ -d deploy/kubernetes-local/apps ]]; then
+            while IFS= read -r file; do
+              perl -0pi -e 's#(^\s*image:\s*).*$#${1}$ENV{IMAGE_URI}#mg' "$file"
+            done < <(find deploy/kubernetes-local/apps -name 'deployment.yaml' -type f)
+
+            while IFS= read -r file; do
+              perl -0pi -e 's#(^\s*repository:\s*).*$#${1}$ENV{IMAGE_REPOSITORY}#mg; s#(^\s*tag:\s*).*$#${1}$ENV{IMAGE_TAG}#mg' "$file"
+            done < <(find deploy/kubernetes-local/apps -name 'values.yaml' -type f)
+
+            if ! git diff --quiet -- deploy/kubernetes-local/apps; then
+              git config user.name "small-challange"
+              git config user.email "small-challange@users.noreply.github.com"
+              git add deploy/kubernetes-local/apps
+              git commit -m "chore: deploy ${{ inputs.environment_name }} image ${{ inputs.image_tag }}"
+              git push origin HEAD:${{ inputs.git_branch }}
+              STATUS="success"
+              MANIFEST_URL="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/commit/$(git rev-parse HEAD)"
+            fi
+          fi
+          {
+            echo "status=$STATUS"
+            echo "revision=$(git rev-parse HEAD)"
+            echo "url=$MANIFEST_URL"
+          } >> "$GITHUB_OUTPUT"
+      - name: Report image push to small-challange
+        if: ${{ always() && env.SMALL_CHALLANGE_WEBHOOK_URL != '' }}
+        shell: bash
+        env:
+          BUILD_OUTCOME: ${{ steps.build_push.outcome }}
+          MANIFEST_OUTCOME: ${{ steps.manifest.outcome }}
+          MANIFEST_STATUS: ${{ steps.manifest.outputs.status }}
+          MANIFEST_REVISION: ${{ steps.manifest.outputs.revision }}
+          MANIFEST_URL: ${{ steps.manifest.outputs.url }}
+        run: |
+          BUILD_STATUS="failed"
+          PUSH_STATUS="failed"
+          if [[ "$BUILD_OUTCOME" == "success" ]]; then
+            BUILD_STATUS="success"
+            PUSH_STATUS="success"
+          fi
+          MANIFEST_RESULT="${MANIFEST_STATUS:-skipped}"
+          if [[ "$MANIFEST_OUTCOME" == "failure" ]]; then
+            MANIFEST_RESULT="failed"
+          fi
+          jq -n \
+            --arg environment_name "${{ inputs.environment_name }}" \
+            --arg github_run_id "$GITHUB_RUN_ID" \
+            --arg run_url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            --arg image_uri "${{ inputs.ecr_repository_url }}" \
+            --arg image_tag "${{ inputs.image_tag }}" \
+            --arg build_status "$BUILD_STATUS" \
+            --arg push_status "$PUSH_STATUS" \
+            --arg manifest_update_status "$MANIFEST_RESULT" \
+            --arg manifest_revision "$MANIFEST_REVISION" \
+            --arg manifest_url "$MANIFEST_URL" \
+            '{
+              environment_name: $environment_name,
+              github_run_id: $github_run_id,
+              run_url: $run_url,
+              image_uri: $image_uri,
+              image_tag: $image_tag,
+              build_status: $build_status,
+              push_status: $push_status,
+              manifest_update_status: $manifest_update_status,
+              manifest_revision: $manifest_revision,
+              manifest_url: $manifest_url
+            }' > application-build-webhook.json
+          curl -fsS \
+            -X POST "$SMALL_CHALLANGE_WEBHOOK_URL/api/webhooks/application-build-status" \
+            -H "Content-Type: application/json" \
+            -H "X-Small-Challange-Token: $SMALL_CHALLANGE_WEBHOOK_TOKEN" \
+            --data @application-build-webhook.json
+      - name: Fail when build failed
+        if: ${{ steps.build_push.outcome != 'success' || steps.manifest.outcome == 'failure' }}
+        run: exit 1
