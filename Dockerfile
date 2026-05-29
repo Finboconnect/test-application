@@ -1,11 +1,3 @@
-FROM nginx:alpine
-
-COPY nginx.conf /etc/nginx/conf.d/default.conf
-
-COPY index.html style.css script.js db.js boards.js theme.js sw.js /usr/share/nginx/html/
-
-COPY README.md /usr/share/nginx/html/README.md
-
-EXPOSE 360
-
-CMD ["nginx", "-g", "daemon off;"]
+FROM alpine:3.20
+WORKDIR /app
+CMD ["sh", "-c", "echo Replace this Dockerfile with your application build && sleep 3600"]
