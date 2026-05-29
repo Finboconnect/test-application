@@ -21,7 +21,7 @@ on:
 
 jobs:
   build:
-    runs-on: kanban-runners
+    runs-on: ubuntu-latest
     permissions:
       contents: write
       id-token: write
