@@ -39,6 +39,10 @@ jobs:
       - name: Ensure ECR repository
         shell: bash
         run: |
+          if ! command -v aws >/dev/null 2>&1; then
+            echo "AWS CLI is not installed on this runner; small-challange backend ensures the ECR repository before dispatch."
+            exit 0
+          fi
           REPOSITORY_NAME="${{ inputs.ecr_repository_url }}"
           REPOSITORY_NAME="${REPOSITORY_NAME#*/}"
           aws ecr describe-repositories \
