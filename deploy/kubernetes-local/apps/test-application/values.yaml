@@ -2,6 +2,6 @@ applicationName: test-application
 githubRepository: Finboconnect/test-application
 image:
   repository: 198737698086.dkr.ecr.eu-west-2.amazonaws.com/test-application
-  tag: dev-you-001
+  tag: test-application-dev-you-003
 service:
   port: 80
