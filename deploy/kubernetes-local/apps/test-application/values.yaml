@@ -1,7 +1,7 @@
 applicationName: test-application
 githubRepository: Finboconnect/test-application
 image:
-  repository: REPLACE_WITH_ECR_REPOSITORY_URL
-  tag: latest
+  repository: 198737698086.dkr.ecr.eu-west-2.amazonaws.com/test-application-dev
+  tag: dev-test-application-001
 service:
   port: 80
