@@ -1,0 +1,7 @@
+applicationName: test-application
+githubRepository: Finboconnect/test-application
+image:
+  repository: REPLACE_WITH_ECR_REPOSITORY_URL
+  tag: latest
+service:
+  port: 80
