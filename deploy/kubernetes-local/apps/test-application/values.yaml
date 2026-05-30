@@ -2,6 +2,6 @@ applicationName: test-application
 githubRepository: Finboconnect/test-application
 image:
   repository: 198737698086.dkr.ecr.eu-west-2.amazonaws.com/test-application
-  tag: probe
+  tag: dev-bottle-rocket-001
 service:
   port: 80
